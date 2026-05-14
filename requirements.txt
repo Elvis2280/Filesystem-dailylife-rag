@@ -1,0 +1,33 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+# API
+fastapi==0.136.1
+uvicorn==0.46.0
+pydantic==2.13.4
+python-dotenv==1.2.2
+pydantic-settings==2.7.1
+
+# Workers
+celery>=5.4.0
+redis>=5.2.0
+flower>=2.0.1
+
+# Vector DB
+qdrant-client>=1.13.0
+
+# ML / Embeddings
+torch>=2.8.0
+sentence-transformers>=3.4.0
+
+# Obsidian / Storage
+PyYAML>=6.0.2
+python-frontmatter>=1.1.0
+
+# Transitive deps (pinned)
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.13.0
+click==8.3.3
+h11==0.16.0
+idna==3.15
+starlette==1.0.0

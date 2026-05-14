@@ -1,0 +1,12 @@
+venv
+.git
+.gitignore
+__pycache__
+*.pyc
+.env
+.env.*
+*.md
+storage/uploads
+storage/vault
+tests
+scripts
