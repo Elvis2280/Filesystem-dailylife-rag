@@ -90,11 +90,12 @@ User-status events that trigger pipeline stages will be defined in a future iter
 
 ## Memory Architecture
 
-| Memory Type  | Storage                              | Purpose                                                              |
-| ------------ | ------------------------------------ | -------------------------------------------------------------------- |
-| Hot/Temporal | Redis                                | Quick embeddings, session data, task status, unfinished task context |
-| Vector       | Qdrant                               | Dense semantic embeddings for retrieval                              |
-| Filesystem   | `brain/english/` + `brain/japanese/` | Original and translated document storage                             |
+| Memory Type | Storage | Purpose |
+|-------------|---------|---------|
+| Hot/Temporal | Redis | Quick embeddings, session data, task status, unfinished task context |
+| Vector | Qdrant | Dense semantic embeddings for retrieval |
+| Relational | Postgres | Document metadata, relationships |
+| Filesystem | `brain/english/` + `brain/japanese/` | Original and translated document storage |
 
 ## Folder Structure
 
@@ -106,46 +107,56 @@ memory-rag/
 │   │   │   ├── documents.py  # Document upload, status, retrieval
 │   │   │   ├── query.py      # RAG query endpoints
 │   │   │   └── health.py     # Health check endpoints
+│   │   ├── ws/               # WebSocket route handlers
 │   │   └── dependencies/     # FastAPI dependency injection
+│   ├── core/                 # Configuration, logging, constants
+│   │   ├── config.py         # Pydantic Settings
+│   │   └── logging.py        # Logging configuration
 │   ├── models/               # Pydantic schemas
 │   │   ├── document.py       # Document request/response models
 │   │   ├── query.py          # Query request/response models
+│   │   ├── events.py         # Event payload schemas
 │   │   └── response.py       # General response models
 │   ├── services/             # Core business logic (pure Python)
-│   │   ├── ocr/              # GLM OCR integration
-│   │   ├── translation/      # Translation service
-│   │   ├── embedding/        # BGE-M3 embedding service
-│   │   ├── vector_store/     # Qdrant client wrapper
-│   │   ├── redis_client/     # Redis client wrapper
 │   │   ├── rag/              # RAG retrieval and answer generation
-│   │   └── storage/
-│   │       └── filesystem.py  # brain/ folder handler
-│   └── core/                 # Configuration, logging, constants
+│   │   ├── retrieval/        # Vector search, document retrieval
+│   │   ├── chunking/         # Document chunking logic
+│   │   ├── language/         # Language detection, translation utilities
+│   │   ├── storage/          # File storage, Redis client, brain/ handler
+│   │   └── metadata/         # Document metadata management
+│   ├── retrieval/            # Retrieval orchestration layer
+│   ├── websocket/            # WebSocket connection manager
+│   └── orchestrator/         # Event-driven pipeline coordination
+│       ├── events/           # Event definitions (TBD)
+│       ├── handlers/         # Event handlers
+│       ├── workflows/        # Pipeline workflows
+│       └── state_machine/    # Pipeline state machine (start → error → retry → success)
 ├── workers/                  # Celery async workers
-│   ├── tasks/
-│   │   ├── save_file.py      # File storage + language detection + dual save
-│   │   ├── ocr_task.py       # OCR processing task
-│   │   ├── translate_task.py # Translation task
-│   │   ├── quick_embed_task.py  # Quick embedding → Redis
-│   │   └── embed_task.py     # Proper embedding → Qdrant
+│   ├── ocr/                  # OCR processing tasks
+│   ├── translation/          # Translation tasks (EN ↔ JA)
+│   ├── embedding/            # Embedding tasks (BGE-M3)
+│   ├── indexing/             # Qdrant indexing tasks
+│   ├── chunking/             # Document chunking tasks
+│   ├── tasks/                # Core pipeline task files
 │   ├── celery_app.py         # Celery configuration
 │   └── worker.py             # Worker entry point
 ├── brain/                    # Bilingual document storage
 │   ├── english/              # English documents
 │   └── japanese/             # Japanese documents
-├── storage/                  # Local file storage
-│   └── uploads/              # Temporary upload staging
 ├── tests/                    # Test suite
 │   ├── unit/                 # Unit tests
 │   └── integration/          # Integration tests
 ├── scripts/                  # Utility and maintenance scripts
+├── main.py                   # FastAPI application entry point
 ├── pyproject.toml            # Project metadata and dependencies
 ├── docker-compose.yml        # Docker compose configuration
+├── docker-compose.dev.yml    # Development overrides
 ├── Dockerfile                # Container build configuration
 ├── README.md                 # Project overview
-├── PROJECT.md                # This file
-└── .env.example              # Environment variables template
+└── PROJECT.md                # This file
 ```
+
+> **Note:** The `storage/` directory is a named Docker volume (not in the repo). It is auto-created by Docker Compose at runtime.
 
 ## Component Responsibilities
 
@@ -158,7 +169,26 @@ FastAPI HTTP/WebSocket layer. Handles incoming requests, validates input, return
 - `routes/documents.py` - Document upload (`POST /documents`), status (`GET /documents/{id}`), language detection, dual file creation
 - `routes/query.py` - RAG query (`POST /query`) with Redis fallback for unfinished tasks
 - `routes/health.py` - Health check (`GET /`, `GET /health`)
-- `routes/ws.py` - WebSocket endpoint for real-time orchestration events
+- `ws/` - WebSocket endpoint handlers for real-time orchestration events
+
+### `app/orchestrator/`
+
+Event-driven pipeline coordination. State machine-based workflow management.
+
+| Module | Responsibility |
+|--------|----------------|
+| `events/` | Event definitions (document_uploaded, document_processing, etc.) |
+| `handlers/` | Event handlers that react to pipeline state changes |
+| `workflows/` | Pipeline workflow definitions (upload → quick embed → OCR → translate → embed → index) |
+| `state_machine/` | State management (start → processing → error → retry → success) |
+
+### `app/retrieval/`
+
+Retrieval orchestration layer. Coordinates query handling with Redis (unfinished tasks) and Qdrant (full data).
+
+### `app/websocket/`
+
+WebSocket connection manager for real-time client notifications.
 
 ### `app/models/`
 
@@ -175,27 +205,27 @@ Pydantic schemas for request/response validation. Ensures type safety across the
 
 Pure business logic with no framework dependencies. Each service is self-contained and testable.
 
-| Service                 | Responsibility                                                                    |
-| ----------------------- | --------------------------------------------------------------------------------- |
-| `ocr/`                  | GLM OCR text extraction from documents                                            |
-| `translation/`          | Document translation (EN ↔ JA)                                                    |
-| `embedding/`            | BGE-M3 embedding generation (quick + proper)                                      |
-| `vector_store/`         | Qdrant CRUD operations (index, search, delete)                                    |
-| `redis_client/`         | Redis operations (quick embeddings, task status, session data)                    |
-| `rag/`                  | Retrieval-augmented generation logic; chooses Redis vs Qdrant based on task state |
-| `storage/filesystem.py` | `brain/` folder read/write, language detection, dual file placement               |
+| Service | Responsibility |
+|---------|----------------|
+| `rag/` | Retrieval-augmented generation logic; chooses Redis vs Qdrant based on task state |
+| `retrieval/` | Qdrant CRUD operations (index, search, delete), vector search |
+| `chunking/` | Document chunking logic for embeddings |
+| `language/` | Language detection, translation utilities (EN ↔ JA) |
+| `storage/` | `brain/` folder read/write, Redis client, file storage, dual file placement |
+| `metadata/` | Document metadata management |
 
 ### `workers/`
 
-Celery tasks for async processing. Each task is a step in the pipeline:
+Celery tasks for async processing. Each task type has its own directory:
 
-| Task                  | Responsibility                                                               |
-| --------------------- | ---------------------------------------------------------------------------- |
-| `save_file.py`        | Persist uploaded file, detect language, create both EN/JA copies in `brain/` |
-| `quick_embed_task.py` | Generate quick embedding and store in Redis immediately                      |
-| `ocr_task.py`         | Extract text via GLM OCR                                                     |
-| `translate_task.py`   | Translate text between EN/JA                                                 |
-| `embed_task.py`       | Generate proper embeddings and index to Qdrant                               |
+| Directory | Responsibility |
+|-----------|----------------|
+| `ocr/` | GLM OCR text extraction from documents |
+| `translation/` | Translate text between EN/JA |
+| `embedding/` | Generate embeddings (BGE-M3) — both quick (Redis) and proper (Qdrant) |
+| `indexing/` | Index embeddings to Qdrant vector database |
+| `chunking/` | Document chunking for embedding generation |
+| `tasks/` | Core pipeline task definitions (save_file, quick_embed, etc.) |
 
 **Files:**
 
@@ -290,6 +320,11 @@ REDIS_PORT=6379
 # Qdrant
 QDRANT_HOST=localhost
 QDRANT_PORT=6333
+
+# Postgres
+POSTGRES_USER=memoryrag
+POSTGRES_PASSWORD=memoryrag
+POSTGRES_DB=memoryrag
 
 # Brain Storage
 BRAIN_PATH=./brain

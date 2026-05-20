@@ -17,13 +17,13 @@ RUN pip install --no-cache-dir --upgrade pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN groupadd -r appgroup && useradd -r -g appgroup -m -u 1000 appuser \
-    && chown -R appuser:appuser /app
+RUN groupadd -r appgroup && useradd -r -g appgroup -m appuser \
+    && chown -R appuser:appgroup /app
 
 USER appuser
 
-COPY --chown=appuser:appuser . .
+COPY --chown=appuser:appgroup . .
 
-RUN mkdir -p /app/storage/uploads /app/storage/vault
+RUN mkdir -p /app/brain/english /app/brain/japanese /app/storage/uploads
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -17,6 +17,9 @@ services:
       - "8000"
     env_file:
       - .env
+    volumes:
+      - ./brain:/app/brain
+      - storage:/app/storage
     depends_on:
       redis:
         condition: service_healthy
@@ -32,6 +35,27 @@ services:
           memory: 512M
 
   worker:
+    build: .
+    command: celery -A workers.celery_app worker --loglevel=info --pool=threads
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - model_cache:/home/appuser/.cache
+    networks:
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  worker-gpu:
+    profiles: ["gpu"]
     build: .
     command: celery -A workers.celery_app worker --loglevel=info --pool=threads
     env_file:
@@ -66,6 +90,8 @@ services:
       - worker
     expose:
       - "5555"
+    ports:
+      - "5555:5555"
     networks:
       - backend
 
@@ -85,9 +111,26 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
       interval: 10s
       timeout: 5s
+      retries: 5
+    networks:
+      - backend
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: memoryrag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-memoryrag}
+      POSTGRES_DB: memoryrag
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoryrag"]
+      interval: 5s
+      timeout: 3s
       retries: 5
     networks:
       - backend
@@ -103,3 +146,5 @@ networks:
 volumes:
   qdrant_data:
   model_cache:
+  storage:
+  postgres_data:

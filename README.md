@@ -52,38 +52,54 @@ memory-rag/
 │   │   │   ├── documents.py  # Document upload, status, retrieval
 │   │   │   ├── query.py     # RAG query endpoints
 │   │   │   └── health.py    # Health check endpoints
+│   │   ├── ws/              # WebSocket route handlers
 │   │   └── dependencies/    # FastAPI dependency injection
+│   ├── core/                # Configuration, logging, constants
+│   │   ├── config.py        # Pydantic Settings (Redis, Qdrant, Postgres, Celery)
+│   │   └── logging.py       # Logging configuration
 │   ├── models/              # Pydantic schemas
 │   │   ├── document.py      # Document request/response models
 │   │   ├── query.py         # Query request/response models
-│   │   └── response.py      # RAG response models
-│   ├── services/            # Core business logic (pure Python)
-│   │   ├── ocr/             # GLM OCR integration
-│   │   ├── translation/     # Translation service
-│   │   ├── embedding/       # BGE-M3 embedding service
-│   │   ├── vector_store/    # Qdrant client wrapper
-│   │   ├── redis_client/    # Redis client wrapper
-│   │   └── rag/             # RAG retrieval and answer generation
-│   └── core/                # Configuration, logging, constants
+│   │   └── response.py      # General response models
+│   ├── services/            # Business logic (pure Python)
+│   │   ├── rag/             # RAG retrieval and answer generation
+│   │   ├── retrieval/       # Vector search, document retrieval
+│   │   ├── chunking/        # Document chunking logic
+│   │   ├── language/        # Language detection, translation utils
+│   │   ├── storage/         # File storage, metadata, Redis client
+│   │   └── metadata/        # Document metadata management
+│   ├── retrieval/           # Retrieval orchestration layer
+│   ├── websocket/           # WebSocket connection manager
+│   └── orchestrator/        # Event-driven pipeline coordination
+│       ├── events/           # Event definitions (TBD)
+│       ├── handlers/         # Event handlers
+│       ├── workflows/        # Pipeline workflows
+│       └── state_machine/    # Pipeline state machine
 ├── workers/                 # Celery async workers
-│   ├── tasks/
-│   │   ├── save_file.py     # File storage async task
-│   │   ├── ocr_task.py      # OCR processing task
-│   │   ├── translate_task.py
-│   │   └── embed_task.py    # Embedding task (Qdrant + Redis)
+│   ├── ocr/                 # GLM OCR tasks
+│   ├── translation/         # Translation tasks
+│   ├── embedding/           # BGE-M3 embedding tasks
+│   ├── indexing/            # Qdrant indexing tasks
+│   ├── chunking/            # Document chunking tasks
+│   ├── tasks/               # Core pipeline tasks
 │   ├── celery_app.py        # Celery configuration
 │   └── worker.py            # Worker entry point
-├── storage/                 # Local file storage
-│   └── uploads/             # Uploaded documents
+├── brain/                   # Bilingual document storage
+│   ├── english/             # English documents
+│   └── japanese/            # Japanese documents
 ├── tests/                   # Test suite
 │   ├── unit/                # Unit tests
 │   └── integration/         # Integration tests
 ├── scripts/                 # Utility and maintenance scripts
+├── main.py                  # FastAPI application entry point
 ├── pyproject.toml           # Project metadata and dependencies
 ├── docker-compose.yml       # Docker compose configuration
+├── docker-compose.dev.yml   # Development overrides
 ├── Dockerfile               # Container build configuration
 └── README.md                # This file
 ```
+
+**Note:** The `storage/` directory is a named Docker volume (not in the repo). It is auto-created by Docker Compose at runtime.
 
 ## Component Descriptions
 
@@ -135,7 +151,11 @@ Application-wide settings: config management, logging setup, constants.
    ```bash
    pip install -r requirements.txt
    ```
-3. Configure environment variables (see `.env.example`)
+3. Create a `.env` file in the project root with overrides (optional):
+   ```env
+   IS_DEVELOPMENT=true
+   ```
+   > All other settings use sensible defaults from `app/core/config.py`. Only add variables you need to override (API keys, secrets, etc.). See `config.py` for the full list.
 4. Start services:
    ```bash
    docker-compose up -d  # Redis, Qdrant
@@ -146,19 +166,64 @@ Application-wide settings: config management, logging setup, constants.
    ```
 6. Start Celery worker:
    ```bash
-   celery -A workers.celery_app worker --loglevel=info
-   ```
+    celery -A workers.celery_app worker --loglevel=info
+    ```
 
-### Running with Docker
+### Development Mode
 
-**Prerequisites:** Docker, Docker Compose, NVIDIA Container Toolkit (for GPU).
+Set `IS_DEVELOPMENT=true` in your `.env` file to enable development features:
+
+| Feature | Dev (`true`) | Prod (`false`) | Description |
+|---------|-------------|----------------|-------------|
+| `RELOAD` | ✅ Auto-reload | ❌ Disabled | Uvicorn restarts on file changes |
+| `LOG_LEVEL` | `DEBUG` | `INFO` | Verbose logging for debugging |
+| `CORS_ORIGINS` | `["*"]` | `[]` | Allow all origins for local frontend |
+| `DOCS_URL` | `/docs` | Disabled | FastAPI Swagger UI |
+| `REDOC_URL` | `/redoc` | Disabled | Alternative API docs |
+| `ACCESS_LOG` | ✅ Enabled | ❌ Disabled | Log every HTTP request |
+| `CELERY_ALWAYS_EAGER` | ✅ Sync | ❌ Async | Run Celery tasks inline (no worker needed) |
+| `EMBEDDING_DEVICE` | `cpu` | Auto-detect | Force CPU for consistent behavior |
+
+#### Development Startup
 
 ```bash
-# 1. Create .env from template
-cp .env.example .env
+# Ensure IS_DEVELOPMENT=true in .env
+
+# Start with development overrides (API on localhost:8000 + --reload)
+docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d
+```
+
+API available at:
+- `http://localhost/` (via nginx)
+- `http://localhost:8000/` (direct, for Postman/debugging)
+- `http://localhost:8000/docs` (Swagger UI)
+- `http://localhost:8000/redoc` (ReDoc)
+- `http://localhost:5555` (Flower dashboard)
+
+### Running with Docker (Production)
+
+When `IS_DEVELOPMENT=false` (or unset), API is only accessible via nginx proxy. For development mode, see the [Development Mode](#development-mode) section above.
+
+**Prerequisites:** Docker, Docker Compose.
+
+#### CPU (default — macOS, cloud VMs, CPU-only machines)
+
+```bash
+# 1. Create .env manually (see Setup section above for required variables)
 
 # 2. Build and start all services
 docker-compose up --build -d
+```
+
+#### GPU (NVIDIA workstation/server)
+
+**Prerequisites:** Docker, Docker Compose, NVIDIA Container Toolkit.
+
+```bash
+# 1. Create .env manually
+
+# 2. Build and start with GPU worker
+docker-compose --profile gpu up --build -d
 ```
 
 **Useful commands:**
@@ -168,14 +233,15 @@ docker-compose up --build -d
 | Check status | `docker-compose ps` |
 | View API logs | `docker-compose logs -f api` |
 | View worker logs | `docker-compose logs -f worker` |
+| View GPU worker logs | `docker-compose logs -f worker-gpu` |
 | View all logs | `docker-compose logs -f` |
 | Restart API | `docker-compose restart api` |
-| Scale workers | `docker-compose up -d --scale worker=3` |
+| Scale CPU workers | `docker-compose up -d --scale worker=3` |
+| Scale GPU workers | `docker-compose --profile gpu up -d --scale worker-gpu=2` |
 | Stop everything | `docker-compose down` |
 | Stop + remove data | `docker-compose down -v` |
 | Shell into API | `docker-compose exec api bash` |
-| Verify GPU access | `docker-compose exec worker nvidia-smi` |
-| Flower dashboard | Open `http://localhost/flower/` |
+| Verify GPU access | `docker-compose exec worker-gpu nvidia-smi` |
 
 **First run:** Workers will download BGE-M3 model (~2GB). Monitor progress with `docker-compose logs -f worker`.
 

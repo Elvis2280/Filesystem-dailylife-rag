@@ -20,28 +20,32 @@ ruff format .
 ## Architecture
 
 - **API**: FastAPI in `main.py` - handles REST + WebSocket, dispatches to Celery workers
-- **Workers**: Celery tasks in `workers/tasks/` - async pipeline: save_file → ocr_task → translate_task → embed_task
+- **Workers**: Celery tasks in `workers/` - async pipeline: ocr → translation → embedding → indexing
+- **Orchestrator**: Event-driven workflow coordinator in `app/orchestrator/`
 - **Client**: OpenCLAW (external AI agent) calls via REST + WebSocket
 
 ## Memory Layers
 
 | Layer | Storage | Purpose |
 |-------|---------|---------|
-| Long-term | Obsidian vault (`storage/vault/`) | Markdown + YAML frontmatter |
-| Hot | Redis | Quick embeddings, session data |
-| Vector | Qdrant | Dense semantic embeddings |
+| Hot/Temporal | Redis | Quick embeddings, session data, task status |
+| Vector | Qdrant | Dense semantic embeddings for retrieval |
+| Relational | Postgres | Document metadata, relationships |
 
 ## Pipeline
 
-1. Upload → save_file → ocr_task → translate_task → embed_task (×2 for EN/JA) → index to Qdrant+Redis → save Obsidian markdown (EN.md + JA.md with wiki links `[[filename]]`)
-2. Bilingual: EN input → JA markdown + both embeddings; JA input → EN markdown + both embeddings
+1. Upload → detect language → store in `brain/english/` + `brain/japanese/`
+2. Quick embedding → Redis (hot data)
+3. Async: ocr → translation → chunking → embedding → indexing → Qdrant + Redis
+4. Bilingual: EN input → JA copy + both embeddings; JA input → EN copy + both embeddings
 
 ## Key Files
 
-- `app/core/config.py` - Settings (Redis, Qdrant, Obsidian, Celery)
+- `app/core/config.py` - Settings (Redis, Qdrant, Postgres, Celery)
 - `app/services/` - Pure business logic (no FastAPI/Celery deps)
-- `workers/tasks/` - Celery async tasks
-- `.env.example` - Required env vars template
+- `app/orchestrator/` - Event-driven pipeline coordination
+- `workers/` - Celery async tasks (OCR, translation, embedding, indexing, chunking)
+- `.env` - Environment variables (create manually; see Setup section)
 
 ## Setup
 
@@ -52,8 +56,9 @@ pip install -r requirements.txt
 # External services (Redis, Qdrant)
 docker-compose up -d
 
-# Copy env and configure
-cp .env.example .env
+# Create .env with only overrides (optional):
+#   IS_DEVELOPMENT=true          # Enable dev mode (auto-reload, debug logs, etc.)
+# All other settings use sensible defaults from app/core/config.py
 ```
 
 ## Code Review Guidelines

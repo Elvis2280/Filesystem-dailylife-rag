@@ -1,1 +1,1 @@
-# Storage Service
+# Redis Client Service
