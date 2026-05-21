@@ -2,6 +2,9 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
+from app.api.routes.workspace import router as workspace_router
+from app.services.storage.requirements_checker import validate_all
+from app.core.logging import configure_logging
 
 if settings.IS_DEVELOPMENT:
     from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +24,31 @@ if settings.IS_DEVELOPMENT:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+app.include_router(workspace_router)
+
+
+@app.on_event("startup")
+async def startup_event():
+    logger = configure_logging(settings.LOG_LEVEL)
+    report = validate_all()
+    
+    # Directory report
+    dir_report = report["directories_created"]
+    if dir_report["status"] == "created":
+        logger.info("Created directories: %s", dir_report["paths"])
+    else:
+        logger.info("All base directories already satisfied")
+
+    errors = []
+    for endpoint, is_up in report["services_status"].items():
+        if is_up:
+            logger.info(f"Service {endpoint} is reachable")
+        else:
+            logger.error(f"Service {endpoint} is NOT reachable")
+            errors.append(f"Service {endpoint} is not reachable")
+    if errors:
+        raise RuntimeError("Startup validation failed: " + "; ".join(errors))
 
 
 @app.get("/")

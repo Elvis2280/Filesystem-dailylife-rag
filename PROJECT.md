@@ -310,21 +310,28 @@ Clients connect via WebSocket to receive real-time updates:
 
 ```env
 # App
-APP_NAME=Memory RAG
+APP_NAME=Personal Memory RAG
 DEBUG=false
+IS_DEVELOPMENT=true          # Enable dev mode (auto-reload, debug logs)
 
 # Redis
-REDIS_HOST=localhost
+REDIS_HOST=redis             # Docker: redis | Local: localhost
 REDIS_PORT=6379
 
 # Qdrant
-QDRANT_HOST=localhost
+QDRANT_HOST=qdrant           # Docker: qdrant | Local: localhost
 QDRANT_PORT=6333
 
 # Postgres
+POSTGRES_HOST=postgres       # Docker: postgres | Local: localhost
+POSTGRES_PORT=5432
 POSTGRES_USER=memoryrag
 POSTGRES_PASSWORD=memoryrag
 POSTGRES_DB=memoryrag
+
+# Nginx
+NGINX_HOST=nginx             # Docker: nginx | Local: localhost
+NGINX_PORT=80
 
 # Brain Storage
 BRAIN_PATH=./brain

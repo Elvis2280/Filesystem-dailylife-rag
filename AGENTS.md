@@ -53,11 +53,15 @@ ruff format .
 # Dependencies
 pip install -r requirements.txt
 
-# External services (Redis, Qdrant)
+# External services (Redis, Qdrant, Postgres)
 docker-compose up -d
 
-# Create .env with only overrides (optional):
-#   IS_DEVELOPMENT=true          # Enable dev mode (auto-reload, debug logs, etc.)
+# .env with only overrides (optional):
+#   IS_DEVELOPMENT=true              # Enable dev mode
+#   REDIS_HOST=localhost             # Local dev override (default: redis)
+#   QDRANT_HOST=localhost            # Local dev override (default: qdrant)
+#   POSTGRES_HOST=localhost          # Local dev override (default: postgres)
+# All other settings use sensible defaults from app/core/config.py
 # All other settings use sensible defaults from app/core/config.py
 ```
 

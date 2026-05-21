@@ -155,7 +155,13 @@ Application-wide settings: config management, logging setup, constants.
    ```env
    IS_DEVELOPMENT=true
    ```
-   > All other settings use sensible defaults from `app/core/config.py`. Only add variables you need to override (API keys, secrets, etc.). See `config.py` for the full list.
+   > For **local development without Docker**, override service hosts:
+   > ```env
+   > REDIS_HOST=localhost
+   > QDRANT_HOST=localhost
+   > POSTGRES_HOST=localhost
+   > ```
+   > In Docker, the default service names (`redis`, `qdrant`, `postgres`) work automatically.
 4. Start services:
    ```bash
    docker-compose up -d  # Redis, Qdrant
