@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.api.routes.workspace import router as workspace_router
-from app.services.storage.requirements_checker import validate_all
+from app.core.requirements_checker import validate_all
 from app.core.logging import configure_logging
 
 if settings.IS_DEVELOPMENT:
