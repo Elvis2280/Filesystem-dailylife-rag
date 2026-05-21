@@ -6,7 +6,6 @@ from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
 
-
 class WorkspaceModel(Base):
     __tablename__ = "workspaces"
 
@@ -14,7 +13,6 @@ class WorkspaceModel(Base):
     display_name = Column(String, nullable=False)
     slug = Column(String, unique=False, nullable=False)
     storage_key = Column(String, unique=True, nullable=False)
-    lang = Column(String, nullable=False)
     status = Column(String, default="active")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(

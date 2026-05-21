@@ -102,3 +102,6 @@ data/
 # Misc
 *.log
 logs/
+
+# Brain storage files
+brain
