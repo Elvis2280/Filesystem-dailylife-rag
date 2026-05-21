@@ -31,7 +31,7 @@ app.include_router(workspace_router)
 @app.on_event("startup")
 async def startup_event():
     logger = configure_logging(settings.LOG_LEVEL)
-    report = validate_all()
+    report = await validate_all()
     
     # Directory report
     dir_report = report["directories_created"]
@@ -47,6 +47,13 @@ async def startup_event():
         else:
             logger.error(f"Service {endpoint} is NOT reachable")
             errors.append(f"Service {endpoint} is not reachable")
+
+    if report.get("postgres_db"):
+        logger.info("Postgres DB: connected")
+    else:
+        logger.error("Postgres DB: connection failed")
+        errors.append("Postgres DB connection failed")
+
     if errors:
         raise RuntimeError("Startup validation failed: " + "; ".join(errors))
 

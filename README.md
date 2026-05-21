@@ -251,6 +251,56 @@ docker-compose --profile gpu up --build -d
 
 **First run:** Workers will download BGE-M3 model (~2GB). Monitor progress with `docker-compose logs -f worker`.
 
+### Migrations
+
+We use **Alembic** for database schema migrations. Migrations are **manual** — you must run them explicitly.
+
+#### Create a Migration
+
+After changing SQLAlchemy models in `app/models/`:
+
+```bash
+# Generate migration script
+docker-compose exec api alembic revision --autogenerate -m "description of changes"
+
+# Review the generated file in alembic/versions/ before applying!
+```
+
+#### Apply Migrations
+
+```bash
+# Upgrade to latest
+docker-compose exec api alembic upgrade head
+
+# Check current version
+docker-compose exec api alembic current
+
+# View migration history
+docker-compose exec api alembic history
+```
+
+#### Rollback
+
+```bash
+# Downgrade one version
+docker-compose exec api alembic downgrade -1
+
+# Reset entirely (dev only!)
+docker-compose exec api alembic downgrade base
+```
+
+#### Initial Setup
+
+First time setting up the project:
+
+```bash
+# 1. Start services
+docker-compose up -d
+
+# 2. Apply all pending migrations
+docker-compose exec api alembic upgrade head
+```
+
 ### API Endpoints
 
 | Method | Endpoint | Description |

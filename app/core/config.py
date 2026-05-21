@@ -80,6 +80,14 @@ class Settings(BaseSettings):
         return [str(base / subdir) for subdir in self.BRAIN_WORKSPACE_SUBDIRS]
 
     @property
+    def DATABASE_URL(self) -> str:
+        """Async PostgreSQL connection URL."""
+        return (
+            f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
+            f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        )
+
+    @property
     def REQUIRED_SERVICES(self) -> list[tuple[str, int]]:
         """(host, port) tuples for startup health checks."""
         return [
