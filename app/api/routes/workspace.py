@@ -8,7 +8,9 @@ from fastapi.exceptions import HTTPException
 router = APIRouter(prefix="/api/v1", tags=["workspace"])
 
 
-@router.post("/workspace", response_model=WorkspaceResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/workspace", response_model=WorkspaceResponse, status_code=status.HTTP_201_CREATED
+)
 async def create_workspace_endpoint(
     request: WorkspaceCreateRequest,
     db: AsyncSession = Depends(get_db),
@@ -16,7 +18,9 @@ async def create_workspace_endpoint(
     try:
         workspace = await create_workspace(request.name, db)
         return workspace
-    except ValueErrorstatus as e:
+    except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except RuntimeError as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        )

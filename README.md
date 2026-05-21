@@ -312,6 +312,83 @@ docker-compose exec api alembic upgrade head
 
 ## Development
 
-- Run tests: `pytest`
+### Testing
+
+We use **pytest** with async support. The test suite is organized into unit and integration tests.
+
+#### Running Tests
+
+```bash
+# All tests
+pytest
+
+# Unit tests only (no external services needed)
+pytest -m unit
+
+# Integration tests only (requires Postgres/Redis)
+pytest -m integration
+
+# With coverage report
+pytest --cov=app --cov-report=term-missing
+```
+
+#### Test Markers
+
+| Marker | Description | Requires |
+|--------|-------------|----------|
+| `unit` | Isolated unit tests | Nothing |
+| `integration` | API endpoint and DB tests | Postgres |
+| `slow` | ML inference, large models | GPU/CPU |
+
+#### Test Database
+
+Integration tests use a separate `test_memoryrag` database that is automatically created and cleaned up between test runs. This keeps your development data safe.
+
+```bash
+# Manually clean the test database
+PGPASSWORD=memoryrag psql -h localhost -U memoryrag -d postgres -c "DROP DATABASE IF EXISTS test_memoryrag"
+```
+
+### Pre-commit Hooks
+
+Pre-commit hooks run automatically before every `git commit` to catch issues early.
+
+#### Setup (once per developer)
+
+```bash
+# Install pre-commit
+pip install pre-commit
+
+# Install git hooks
+pre-commit install
+```
+
+#### Usage
+
+After setup, hooks run automatically on every commit:
+
+```bash
+git add .
+git commit -m "feat: add feature"
+# Hooks run: ruff lint + format
+# If formatting changed files, re-stage and commit again:
+# git add . && git commit -m "feat: add feature"
+```
+
+#### What Hooks Run
+
+| Hook | Action | On Failure |
+|------|--------|------------|
+| `ruff` | Lint check for bugs | ❌ Blocks commit |
+| `ruff-format` | Auto-format code | ✅ Auto-fixes (re-stage needed) |
+
+#### Bypass (Emergency Only)
+
+```bash
+git commit -m "fix: urgent hotfix" --no-verify
+```
+
+### Linting & Formatting
+
 - Lint: `ruff check .`
 - Format: `ruff format .`

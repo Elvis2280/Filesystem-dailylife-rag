@@ -21,6 +21,7 @@ services:
       - ./brain:/app/brain
       - storage:/app/storage
       - ./alembic:/app/alembic
+      - ./tests:/app/tests
     depends_on:
       redis:
         condition: service_healthy

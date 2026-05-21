@@ -17,7 +17,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Import all models here so Alembic detects them
-from app.models.workspace import WorkspaceModel  # noqa: F401
+from app.models.workspace import WorkspaceModel  # noqa: E402, F401
 
 target_metadata = Base.metadata
 

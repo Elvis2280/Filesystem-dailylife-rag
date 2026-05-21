@@ -13,7 +13,9 @@ from app.core.utility import generate_slug
 logger = configure_logging("INFO")
 
 
-async def create_workspace(workspace_name: str, db_session: AsyncSession) -> WorkspaceModel:
+async def create_workspace(
+    workspace_name: str, db_session: AsyncSession
+) -> WorkspaceModel:
     """Create a new workspace with filesystem directories and database record."""
     base_dir = Path(WORKSPACE_BASE_PATH)
     slug = generate_slug(workspace_name)

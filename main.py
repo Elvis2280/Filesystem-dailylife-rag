@@ -32,7 +32,7 @@ app.include_router(workspace_router)
 async def startup_event():
     logger = configure_logging(settings.LOG_LEVEL)
     report = await validate_all()
-    
+
     # Directory report
     dir_report = report["directories_created"]
     if dir_report["status"] == "created":

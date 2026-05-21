@@ -70,7 +70,12 @@ class Settings(BaseSettings):
 
     # Directory structure
     BRAIN_WORKSPACE_SUBDIRS: list[str] = Field(
-        default=["english/work", "english/personal", "japanese/work", "japanese/personal"]
+        default=[
+            "english/work",
+            "english/personal",
+            "japanese/work",
+            "japanese/personal",
+        ]
     )
 
     @property
