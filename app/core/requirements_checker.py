@@ -5,21 +5,16 @@ from app.core.config import settings
 
 
 def ensure_directories() -> dict:
-    """Create missing directories. Return status + paths dict."""
-    created = []
+    """Validate required directories exist. Return status + missing paths."""
+    missing = []
     for dir_path in settings.REQUIRED_DIRS:
         path = Path(dir_path)
-        if path.exists():
-            continue
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-            created.append(str(path))
-        except (OSError, PermissionError) as e:
-            raise RuntimeError(f"Failed to create directory {dir_path}: {e}") from e
+        if not path.exists():
+            missing.append(str(path))
 
     return {
-        "status": "created" if created else "satisfied",
-        "paths": created,
+        "status": "satisfied" if not missing else "missing",
+        "paths": missing,
     }
 
 

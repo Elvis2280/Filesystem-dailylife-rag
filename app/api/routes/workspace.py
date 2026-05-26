@@ -9,7 +9,9 @@ router = APIRouter(prefix="/api/v1", tags=["workspace"])
 
 
 @router.post(
-    "/workspace", response_model=WorkspaceResponse, status_code=status.HTTP_201_CREATED
+    "/workspace",
+    response_model=WorkspaceResponse,
+    status_code=status.HTTP_201_CREATED,
 )
 async def create_workspace_endpoint(
     request: WorkspaceCreateRequest,

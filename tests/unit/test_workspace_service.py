@@ -12,7 +12,7 @@ class TestCreateWorkspace:
     @pytest.mark.asyncio
     async def test_creates_workspace_and_returns_model(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            "app.services.storage.workspace.WORKSPACE_BASE_PATH", str(tmp_path)
+            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
         )
 
         db_session = AsyncMock()
@@ -34,7 +34,7 @@ class TestCreateWorkspace:
     @pytest.mark.asyncio
     async def test_raises_value_error_if_workspace_exists(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            "app.services.storage.workspace.WORKSPACE_BASE_PATH", str(tmp_path)
+            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
         )
 
         slug = "test-project"
@@ -49,7 +49,7 @@ class TestCreateWorkspace:
     @pytest.mark.asyncio
     async def test_raises_runtime_error_on_db_failure(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            "app.services.storage.workspace.WORKSPACE_BASE_PATH", str(tmp_path)
+            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
         )
 
         db_session = AsyncMock()
@@ -63,7 +63,7 @@ class TestCreateWorkspace:
     @pytest.mark.asyncio
     async def test_creates_filesystem_directories(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            "app.services.storage.workspace.WORKSPACE_BASE_PATH", str(tmp_path)
+            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
         )
 
         db_session = AsyncMock()

@@ -5,10 +5,11 @@ from pathlib import Path
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.constant import WORKSPACE_BASE_PATH, WORKSPACE_LANGUAGES
+from app.core.constant import WorkspaceLanguage
 from app.core.logging import configure_logging
 from app.models.workspace import WorkspaceModel
 from app.core.utility import generate_slug
+from app.core.config import settings
 
 logger = configure_logging("INFO")
 
@@ -17,15 +18,15 @@ async def create_workspace(
     workspace_name: str, db_session: AsyncSession
 ) -> WorkspaceModel:
     """Create a new workspace with filesystem directories and database record."""
-    base_dir = Path(WORKSPACE_BASE_PATH)
+    base_dir = Path(settings.BRAIN_PATH)
     slug = generate_slug(workspace_name)
 
-    for lang in WORKSPACE_LANGUAGES:
+    for lang in WorkspaceLanguage:
         workspace_dir = base_dir / lang / slug
         if workspace_dir.exists():
             raise ValueError(f"Workspace '{workspace_name}' already exists")
 
-    for lang in WORKSPACE_LANGUAGES:
+    for lang in WorkspaceLanguage:
         workspace_dir = base_dir / lang / slug
         workspace_dir.mkdir(parents=True, exist_ok=False)
 
@@ -43,7 +44,7 @@ async def create_workspace(
         return new_workspace
     except (IntegrityError, SQLAlchemyError, OSError) as e:
         await db_session.rollback()
-        for lang in WORKSPACE_LANGUAGES:
+        for lang in WorkspaceLanguage:
             workspace_dir = base_dir / lang / slug
             if workspace_dir.exists():
                 try:

@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12-venv \
     python3-pip \
     gcc \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3.12 -m venv /app/venv
@@ -20,10 +21,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN groupadd -r appgroup && useradd -r -g appgroup -m appuser \
     && chown -R appuser:appgroup /app
 
-USER appuser
-
 COPY --chown=appuser:appgroup . .
 
-RUN mkdir -p /app/brain/english /app/brain/japanese /app/storage/uploads
+COPY --chown=appuser:appgroup docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

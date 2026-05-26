@@ -1,3 +1,15 @@
+from enum import Enum
+
 # Workspace configuration constants
 WORKSPACE_BASE_PATH = "./brain"
-WORKSPACE_LANGUAGES = ["english", "japanese"]
+
+
+# Workspace
+class WorkspaceLanguage(str, Enum):
+    ENGLISH = "english"
+    JAPANESE = "japanese"
+
+
+class WorkspaceStatus(str, Enum):
+    ACTIVE = "active"
+    DISABLED = "disabled"

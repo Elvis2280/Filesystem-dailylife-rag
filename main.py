@@ -35,10 +35,10 @@ async def startup_event():
 
     # Directory report
     dir_report = report["directories_created"]
-    if dir_report["status"] == "created":
-        logger.info("Created directories: %s", dir_report["paths"])
-    else:
+    if dir_report["status"] == "satisfied":
         logger.info("All base directories already satisfied")
+    elif dir_report["status"] == "missing":
+        logger.warning("Missing directories: %s", dir_report["paths"])
 
     errors = []
     for endpoint, is_up in report["services_status"].items():
