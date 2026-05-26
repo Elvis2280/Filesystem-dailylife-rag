@@ -93,8 +93,8 @@ memory-rag/
 ├── scripts/                 # Utility and maintenance scripts
 ├── main.py                  # FastAPI application entry point
 ├── pyproject.toml           # Project metadata and dependencies
-├── docker-compose.yml       # Docker compose configuration
-├── docker-compose.dev.yml   # Development overrides
+├── docker-compose.yml       # Docker compose configuration (dev)
+├── docker-compose.prod.yml  # Production configuration
 ├── Dockerfile               # Container build configuration
 └── README.md                # This file
 ```
@@ -195,20 +195,39 @@ Set `IS_DEVELOPMENT=true` in your `.env` file to enable development features:
 ```bash
 # Ensure IS_DEVELOPMENT=true in .env
 
-# Start with development overrides (API on localhost:8000 + --reload)
-docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d
+# Start full stack with hot reload
+docker-compose up --build -d
 ```
 
 API available at:
-- `http://localhost/` (via nginx)
-- `http://localhost:8000/` (direct, for Postman/debugging)
-- `http://localhost:8000/docs` (Swagger UI)
-- `http://localhost:8000/redoc` (ReDoc)
+- `http://localhost:8080/` (via nginx)
+- `http://localhost:8080/docs` (Swagger UI)
+- `http://localhost:8080/redoc` (ReDoc)
 - `http://localhost:5555` (Flower dashboard)
 
-### Running with Docker (Production)
+### Production Mode
 
-When `IS_DEVELOPMENT=false` (or unset), API is only accessible via nginx proxy. For development mode, see the [Development Mode](#development-mode) section above.
+Use the dedicated production compose file:
+
+```bash
+# 1. Create .env with IS_DEVELOPMENT=false (or unset)
+
+# 2. Build and start production stack
+docker-compose -f docker-compose.prod.yml up --build -d
+```
+
+API available at `http://localhost/` (via nginx on port 80).
+
+**Differences from dev:**
+
+| | Dev | Prod |
+|--|-----|------|
+| Nginx port | `8080` | `80` |
+| API reload | ✅ `--reload` | ❌ Dockerfile CMD |
+| Brain storage | Bind mount `./brain` | Named volume `brain_data` |
+| Tests mount | ✅ `./tests` | ❌ |
+| Flower UI | ✅ | ❌ |
+| API memory limit | 512M | 1G |
 
 **Prerequisites:** Docker, Docker Compose.
 
@@ -234,20 +253,21 @@ docker-compose --profile gpu up --build -d
 
 **Useful commands:**
 
-| Action | Command |
-|--------|---------|
-| Check status | `docker-compose ps` |
-| View API logs | `docker-compose logs -f api` |
-| View worker logs | `docker-compose logs -f worker` |
-| View GPU worker logs | `docker-compose logs -f worker-gpu` |
-| View all logs | `docker-compose logs -f` |
-| Restart API | `docker-compose restart api` |
-| Scale CPU workers | `docker-compose up -d --scale worker=3` |
-| Scale GPU workers | `docker-compose --profile gpu up -d --scale worker-gpu=2` |
-| Stop everything | `docker-compose down` |
-| Stop + remove data | `docker-compose down -v` |
-| Shell into API | `docker-compose exec api bash` |
-| Verify GPU access | `docker-compose exec worker-gpu nvidia-smi` |
+| Action | Dev | Prod |
+|--------|-----|------|
+| Start stack | `docker-compose up --build -d` | `docker-compose -f docker-compose.prod.yml up --build -d` |
+| Check status | `docker-compose ps` | `docker-compose -f docker-compose.prod.yml ps` |
+| View API logs | `docker-compose logs -f api` | `docker-compose -f docker-compose.prod.yml logs -f api` |
+| View worker logs | `docker-compose logs -f worker` | `docker-compose -f docker-compose.prod.yml logs -f worker` |
+| View GPU worker logs | `docker-compose logs -f worker-gpu` | `docker-compose -f docker-compose.prod.yml logs -f worker-gpu` |
+| View all logs | `docker-compose logs -f` | `docker-compose -f docker-compose.prod.yml logs -f` |
+| Restart API | `docker-compose restart api` | `docker-compose -f docker-compose.prod.yml restart api` |
+| Scale CPU workers | `docker-compose up -d --scale worker=3` | `docker-compose -f docker-compose.prod.yml up -d --scale worker=3` |
+| Scale GPU workers | `docker-compose --profile gpu up -d --scale worker-gpu=2` | `docker-compose -f docker-compose.prod.yml --profile gpu up -d --scale worker-gpu=2` |
+| Stop everything | `docker-compose down` | `docker-compose -f docker-compose.prod.yml down` |
+| Stop + remove data | `docker-compose down -v` | `docker-compose -f docker-compose.prod.yml down -v` |
+| Shell into API | `docker-compose exec api bash` | `docker-compose -f docker-compose.prod.yml exec api bash` |
+| Verify GPU access | `docker-compose exec worker-gpu nvidia-smi` | `docker-compose -f docker-compose.prod.yml exec worker-gpu nvidia-smi` |
 
 **First run:** Workers will download BGE-M3 model (~2GB). Monitor progress with `docker-compose logs -f worker`.
 
