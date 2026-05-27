@@ -10,8 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gosu \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3.12 -m venv /app/venv
-ENV PATH="/app/venv/bin:$PATH"
+RUN python3.12 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 RUN pip install --no-cache-dir --upgrade pip
 
@@ -19,9 +19,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 RUN groupadd -r appgroup && useradd -r -g appgroup -m appuser \
-    && chown -R appuser:appgroup /app
+    && chown -R appuser:appgroup /opt/venv
 
-COPY --chown=appuser:appgroup . .
+COPY . .
 
 COPY --chown=appuser:appgroup docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

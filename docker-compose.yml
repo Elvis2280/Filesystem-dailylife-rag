@@ -13,16 +13,22 @@ services:
 
   api:
     build: .
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    command: >
+      sh -c "if [ \"$DEBUGPY\" = \"1\" ]; then
+        python -Xfrozen_modules=off -m debugpy --listen 0.0.0.0:5678 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload;
+      else
+        uvicorn main:app --host 0.0.0.0 --port 8000 --reload;
+      fi"
     expose:
       - "8000"
+    ports:
+      - "5678:5678"
     env_file:
       - .env
     volumes:
+      - .:/app
       - ./brain:/app/brain
       - storage:/app/storage
-      - ./alembic:/app/alembic
-      - ./tests:/app/tests
     depends_on:
       redis:
         condition: service_healthy

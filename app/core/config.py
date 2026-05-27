@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # Embeddings
     EMBEDDING_DEVICE: str = Field(default="cpu")
 
+    # Debug
+    DEBUGPY: bool = Field(default=False)
+
     # Redis
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
