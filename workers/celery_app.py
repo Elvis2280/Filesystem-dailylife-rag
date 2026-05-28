@@ -14,3 +14,5 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
 )
+
+import workers.ocr.tasks  # noqa: F401, E402

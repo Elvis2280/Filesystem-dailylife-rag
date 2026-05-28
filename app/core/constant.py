@@ -13,3 +13,7 @@ class WorkspaceLanguage(str, Enum):
 class WorkspaceStatus(str, Enum):
     ACTIVE = "active"
     DISABLED = "disabled"
+
+
+class FileStatus(str, Enum):
+    STORAGED = "in_storage"

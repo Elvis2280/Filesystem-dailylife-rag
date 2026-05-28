@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.api.routes.workspace import router as workspace_router
+from app.api.routes.file import router as file_router
 from app.core.requirements_checker import validate_all
 from app.core.logging import configure_logging
 
@@ -26,6 +27,7 @@ if settings.IS_DEVELOPMENT:
     )
 
 app.include_router(workspace_router)
+app.include_router(file_router)
 
 
 @app.on_event("startup")
@@ -53,6 +55,26 @@ async def startup_event():
     else:
         logger.error("Postgres DB: connection failed")
         errors.append("Postgres DB connection failed")
+
+    from app.services.ai.ollama_client import OllamaClient
+
+    ollama = OllamaClient()
+    if await ollama.health_check():
+        logger.info(
+            "Ollama: connected at %s:%d", settings.OLLAMA_HOST, settings.OLLAMA_PORT
+        )
+        if await ollama.is_model_available(settings.OLLAMA_MODEL_OCR):
+            logger.info("Ollama model '%s' is available", settings.OLLAMA_MODEL_OCR)
+        else:
+            logger.warning(
+                "Ollama model '%s' is NOT available", settings.OLLAMA_MODEL_OCR
+            )
+    else:
+        logger.warning(
+            "Ollama: NOT reachable at %s:%d. OCR and LLM features will be unavailable.",
+            settings.OLLAMA_HOST,
+            settings.OLLAMA_PORT,
+        )
 
     if errors:
         raise RuntimeError("Startup validation failed: " + "; ".join(errors))

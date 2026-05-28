@@ -11,6 +11,7 @@ class WorkspaceCreateRequest(BaseModel):
 class WorkspaceEntry(BaseModel):
     display_name: str
     slug: str
+    workspace_id: str
 
 
 class WorkspaceResponse(BaseModel):

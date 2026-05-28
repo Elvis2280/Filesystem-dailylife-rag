@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     NGINX_HOST: str = "nginx"
     NGINX_PORT: int = 80
 
+    # Ollama
+    OLLAMA_HOST: str = "localhost"
+    OLLAMA_PORT: int = 11434
+    OLLAMA_MODEL_OCR: str = "glm-ocr:latest"
+    OLLAMA_TIMEOUT: int = 120
+
     # Brain Storage
     BRAIN_PATH: str = "./brain"
     BRAIN_ENGLISH_PATH: str = "./brain/english"
@@ -101,7 +107,6 @@ class Settings(BaseSettings):
         return [
             (self.REDIS_HOST, self.REDIS_PORT),
             (self.POSTGRES_HOST, self.POSTGRES_PORT),
-            (self.NGINX_HOST, self.NGINX_PORT),
         ]
 
     # Upload Staging

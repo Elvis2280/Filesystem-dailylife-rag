@@ -19,6 +19,7 @@ if config.config_file_name is not None:
 # Import all models here so Alembic detects them
 from app.models.workspace import WorkspaceModel  # noqa: E402, F401
 from app.models.disabled_workspace import DisabledWorkspace  # noqa: E402, F401
+from app.models.file import FileModel  # noqa: E402, F401
 
 target_metadata = Base.metadata
 

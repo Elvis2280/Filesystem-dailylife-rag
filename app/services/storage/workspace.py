@@ -29,7 +29,10 @@ async def get_workspaces_tree_json(
     )
     workspaces = result.scalars().all()
 
-    entries = [{"display_name": w.display_name, "slug": w.slug} for w in workspaces]
+    entries = [
+        {"display_name": w.display_name, "slug": w.slug, "workspace_id": w.storage_key}
+        for w in workspaces
+    ]
 
     return {
         "english": entries,
