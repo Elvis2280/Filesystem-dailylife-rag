@@ -1,4 +1,9 @@
-"""Main OCR dispatcher - routes files to the correct extractor based on MIME type."""
+"""Main OCR dispatcher - routes files to the correct extractor based on MIME type.
+
+For PDFs: delegates to pdf_extractor.py (embedded text first, then OCR fallback).
+For images: delegates to image_ocr.py (GLM-ocr vision model).
+Unsupported types: raises ValueError with clear error message.
+"""
 
 from pathlib import Path
 

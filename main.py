@@ -1,3 +1,28 @@
+"""Memory RAG - FastAPI Application Entry Point.
+
+A bilingual (English/Japanese) Retrieval-Augmented Generation system that
+processes uploaded documents through an async pipeline: OCR → translation →
+chunking → embedding → indexing. Uses FastAPI for the REST + WebSocket API,
+with Celery workers handling the heavy async processing.
+
+Architecture:
+    ┌──────────┐     ┌─────────────┐     ┌──────────────────┐
+    │  Client  │────▶│  FastAPI     │────▶│  Celery Workers  │
+    │ (OpenCLAW)│     │  (main.py)   │     │  (workers/)      │
+    └──────────┘     └─────────────┘     └──────────────────┘
+                           │                       │
+                           ▼                       ▼
+                    ┌──────────────┐     ┌──────────────────┐
+                    │   Services   │     │  Storage Layers  │
+                    │  (app/services)    │ Redis/Qdrant/PG  │
+                    └──────────────┘     └──────────────────┘
+
+Startup Validation:
+    On startup, verifies all external services are reachable
+    (Redis, Qdrant, Postgres, Ollama) and required directories exist.
+    Raises RuntimeError if any critical dependency is missing.
+"""
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
@@ -7,6 +32,7 @@ from app.api.routes.file import router as file_router
 from app.core.requirements_checker import validate_all
 from app.core.logging import configure_logging
 
+# CORS middleware is only needed in development for frontend dev servers
 if settings.IS_DEVELOPMENT:
     from fastapi.middleware.cors import CORSMiddleware
 
@@ -17,6 +43,7 @@ app = FastAPI(
     redoc_url=settings.REDOC_URL,
 )
 
+# Allow cross-origin requests from development frontend (e.g., localhost:3000)
 if settings.IS_DEVELOPMENT:
     app.add_middleware(
         CORSMiddleware,
@@ -26,22 +53,34 @@ if settings.IS_DEVELOPMENT:
         allow_headers=["*"],
     )
 
+# Register API route modules
 app.include_router(workspace_router)
 app.include_router(file_router)
 
 
 @app.on_event("startup")
 async def startup_event():
+    """Validate all external services and directories on application startup.
+
+    Checks Redis, Qdrant, Postgres, and Ollama connectivity.
+    Ensures required base directories exist.
+    Raises RuntimeError if any critical service is unreachable.
+
+    Raises:
+        RuntimeError: If one or more required services are not reachable.
+    """
     logger = configure_logging(settings.LOG_LEVEL)
     report = await validate_all()
 
-    # Directory report
+    # --- Directory Validation ---
     dir_report = report["directories_created"]
     if dir_report["status"] == "satisfied":
         logger.info("All base directories already satisfied")
     elif dir_report["status"] == "missing":
         logger.warning("Missing directories: %s", dir_report["paths"])
 
+    # --- Service Connectivity Checks ---
+    # Collect all failures to report them at once, rather than failing early
     errors = []
     for endpoint, is_up in report["services_status"].items():
         if is_up:
@@ -50,12 +89,15 @@ async def startup_event():
             logger.error(f"Service {endpoint} is NOT reachable")
             errors.append(f"Service {endpoint} is not reachable")
 
+    # --- Postgres Database Check ---
     if report.get("postgres_db"):
         logger.info("Postgres DB: connected")
     else:
         logger.error("Postgres DB: connection failed")
         errors.append("Postgres DB connection failed")
 
+    # --- Ollama Model Availability Check ---
+    # Ollama is optional for non-OCR features, so we warn instead of hard-failing
     from app.services.ai.ollama_client import OllamaClient
 
     ollama = OllamaClient()
@@ -76,20 +118,32 @@ async def startup_event():
             settings.OLLAMA_PORT,
         )
 
+    # Fail fast if any critical dependency is missing
     if errors:
         raise RuntimeError("Startup validation failed: " + "; ".join(errors))
 
 
 @app.get("/")
 def root():
+    """Root endpoint returning a basic status message.
+
+    Returns:
+        JSONResponse: Simple health-check style response confirming the API is live.
+    """
     return JSONResponse(content={"message": "Hello World", "status": "ok"})
 
 
 @app.get("/health")
 def health():
+    """Health check endpoint for load balancers and monitoring.
+
+    Returns:
+        JSONResponse: Status indicating the application is running.
+    """
     return JSONResponse(content={"status": "healthy"})
 
 
+# Development server entry point — not used in production (gunicorn instead)
 if __name__ == "__main__":
     import uvicorn
 
