@@ -8,6 +8,7 @@ app.services.ai.ollama_sync.
 import httpx
 
 from app.core.config import settings
+from app.schemas.ollama import OllamaStatusResponse
 
 
 class OllamaClient:
@@ -43,39 +44,73 @@ class OllamaClient:
         self.timeout = timeout or settings.OLLAMA_TIMEOUT
         self.base_url = f"http://{self.host}:{self.port}"
 
-    async def health_check(self) -> bool:
-        """Check if Ollama server is reachable.
-
-        Sends a GET request to the /api/tags endpoint to verify
-        connectivity. Returns True if the server responds with 200.
+    async def health_check(self) -> OllamaStatusResponse:
+        """Check if Ollama server is reachable and list available models.
 
         Returns:
-            True if the Ollama server is reachable, False otherwise.
+            OllamaStatusResponse with is_reachable=True and model list on success,
+            or is_reachable=False with empty model list on failure.
         """
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.get(f"{self.base_url}/api/tags")
-                return response.status_code == 200
+                list_models = response.json().get("models", [])
+                return OllamaStatusResponse(
+                    is_reachable=True,
+                    available_models=[m["name"] for m in list_models],
+                )
             except Exception:
-                return False
+                return OllamaStatusResponse(
+                    is_reachable=False,
+                    available_models=[],
+                )
 
-    async def is_model_available(self, model_name: str) -> bool:
-        """Check if a specific model is pulled and available on the server.
-
-        Fetches the list of available models from /api/tags and checks
-        if the requested model name is present.
+    async def generate_ocr_async(self, image_base64: str) -> str:
+        """Asynchronously extract text from an image using the GLM-ocr vision model.
 
         Args:
-            model_name: The name of the Ollama model to check (e.g., 'glm-ocr').
+            image_base64: Base64-encoded image string.
 
         Returns:
-            True if the model is available, False otherwise.
+            Extracted raw text from the image.
+
+        Raises:
+            RuntimeError: If the OCR request fails.
         """
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
-                response = await client.get(f"{self.base_url}/api/tags")
-                data = response.json()
-                models = [m["name"] for m in data.get("models", [])]
-                return model_name in models
-            except Exception:
-                return False
+                response = await client.post(
+                    f"{self.base_url}/api/chat",
+                    json={
+                        "model": settings.OLLAMA_MODEL_OCR,
+                        "stream": False,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Extract all visible text from this image exactly as it appears. "
+                                    "Preserve every word, number, and symbol. "
+                                    "Do not reformat, summarize, or add any commentary. "
+                                    "Return only the raw extracted text."
+                                ),
+                                "images": [image_base64],
+                            }
+                        ],
+                        # Deterministic output: no randomness, large context for long documents
+                        "options": {
+                            "num_ctx": 20480,
+                            "num_predict": 2048,
+                            "temperature": 0,
+                        },
+                    },
+                )
+                response.raise_for_status()
+                return response.json().get("message", {}).get("content", "")
+            except httpx.HTTPStatusError as e:
+                raise RuntimeError(
+                    f"OCR failed (HTTP error {e.response.status_code}): {e.response.text}"
+                ) from e
+            except Exception as e:
+                raise RuntimeError(
+                    f"OCR failed (GLM model unavailable or error): {e}"
+                ) from e

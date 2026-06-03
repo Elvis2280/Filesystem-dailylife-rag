@@ -38,7 +38,7 @@ class OllamaSyncClient:
         base_url = f"http://{host}:{port}"
         self._client = Client(host=base_url)
 
-    def generate_ocr(self, image_path: str) -> str:
+    def generate_ocr(self, image_file: str | bytes) -> str:
         """Extract text from image using GLM-ocr vision model.
 
         Sends the image to the Ollama server with a prompt instructing
@@ -46,7 +46,7 @@ class OllamaSyncClient:
         (temperature=0, generous context window) for reliable results.
 
         Args:
-            image_path: Path to the image file to OCR.
+            image_file: Path to the image file to OCR or the image data as bytes.
 
         Returns:
             Extracted raw text from the image.
@@ -66,7 +66,7 @@ class OllamaSyncClient:
                             "Do not reformat, summarize, or add any commentary. "
                             "Return only the raw extracted text."
                         ),
-                        "images": [image_path],
+                        "images": [image_file],
                     }
                 ],
                 # Deterministic output: no randomness, large context for long documents

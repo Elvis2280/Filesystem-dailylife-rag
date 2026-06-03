@@ -5,17 +5,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.constant import ALLOWED_DOCUMENT_MIME_TYPES
 from app.models.workspace import WorkspaceModel
 from app.schemas.file import FileUploadResponse
 from app.services.storage.file import process_file_upload
 
 router = APIRouter(prefix="/api/v1", tags=["files"])
-
-ALLOWED_MIME_TYPES: set[str] = {
-    "application/pdf",
-    "image/png",
-    "image/jpeg",
-}
 
 
 def _is_valid_uuid(value: str) -> bool:
@@ -42,6 +37,13 @@ async def upload_file(
             detail="workspace_id must be a valid UUID",
         )
 
+    if file.content_type not in ALLOWED_DOCUMENT_MIME_TYPES:
+        allowed = ", ".join(sorted(ALLOWED_DOCUMENT_MIME_TYPES))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File type '{file.content_type}' not allowed. Supported types: {allowed}",
+        )
+
     result = await db.execute(
         select(WorkspaceModel).filter_by(storage_key=workspace_id)
     )
@@ -50,15 +52,6 @@ async def upload_file(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workspace '{workspace_id}' not found",
-        )
-
-    if file.content_type not in ALLOWED_MIME_TYPES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"File type '{file.content_type}' not allowed. "
-                "Supported types: PDF, PNG, JPG, JPEG"
-            ),
         )
 
     file_record, task_id = await process_file_upload(str(workspace.id), file, db)

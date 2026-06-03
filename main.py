@@ -29,12 +29,14 @@ from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.api.routes.workspace import router as workspace_router
 from app.api.routes.file import router as file_router
+
 from app.core.requirements_checker import validate_all
 from app.core.logging import configure_logging
 
 # CORS middleware is only needed in development for frontend dev servers
 if settings.IS_DEVELOPMENT:
     from fastapi.middleware.cors import CORSMiddleware
+    from app.api.routes.ollama import router as ollama_router
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -52,6 +54,10 @@ if settings.IS_DEVELOPMENT:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+# Allow API Endpoints if is_development is True
+if settings.IS_DEVELOPMENT:
+    app.include_router(ollama_router)
 
 # Register API route modules
 app.include_router(workspace_router)
@@ -101,11 +107,12 @@ async def startup_event():
     from app.services.ai.ollama_client import OllamaClient
 
     ollama = OllamaClient()
-    if await ollama.health_check():
+    health_resp = await ollama.health_check()
+    if health_resp.is_reachable:
         logger.info(
             "Ollama: connected at %s:%d", settings.OLLAMA_HOST, settings.OLLAMA_PORT
         )
-        if await ollama.is_model_available(settings.OLLAMA_MODEL_OCR):
+        if settings.OLLAMA_MODEL_OCR in health_resp.available_models:
             logger.info("Ollama model '%s' is available", settings.OLLAMA_MODEL_OCR)
         else:
             logger.warning(
