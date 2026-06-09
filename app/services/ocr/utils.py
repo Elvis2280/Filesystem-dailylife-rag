@@ -39,3 +39,29 @@ def get_handler_category(mime_type: str) -> str:
         "image/jpeg": "image",
     }
     return category_map.get(mime_type, "")
+
+
+def build_libreoffice_command(file_path: str, output_path: str) -> list[str]:
+    """Construct the command to open a file with LibreOffice for conversion.
+
+    This is used as a fallback for non-PDF files that need to be converted
+    to PDF before OCR processing. The command opens the file in LibreOffice,
+    allowing the user to manually save it as PDF if needed.
+
+    Args:
+        file_path: Absolute path to the input file.
+        output_path: Desired output path for the converted PDF.
+
+    Returns:
+        List of command arguments to execute.
+    """
+    command = [
+        "libreoffice",
+        "--headless",
+        "--convert-to",
+        "pdf",
+        str(file_path),
+        "--outdir",
+        str(output_path),
+    ]
+    return command

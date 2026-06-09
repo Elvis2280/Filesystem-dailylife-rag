@@ -54,7 +54,7 @@ async def get_workspaces_tree_json(
         workspace_id.
     """
     result = await db_session.execute(
-        select(WorkspaceModel).where(WorkspaceModel.status != WorkspaceStatus.DISABLED)
+        select(WorkspaceModel).where(WorkspaceModel.status == WorkspaceStatus.ACTIVE)
     )
     workspaces = result.scalars().all()
 
@@ -185,7 +185,10 @@ async def create_workspace(
     # Both language directories must be created before the DB insert
     for lang in WorkspaceLanguage:
         workspace_dir = base_dir / lang / slug
-        workspace_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            workspace_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            raise ValueError(f"Workspace '{workspace_name}' already exists")
 
     new_workspace = WorkspaceModel(
         display_name=workspace_name,

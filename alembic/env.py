@@ -20,6 +20,7 @@ if config.config_file_name is not None:
 from app.models.workspace import WorkspaceModel  # noqa: E402, F401
 from app.models.disabled_workspace import DisabledWorkspace  # noqa: E402, F401
 from app.models.file import FileModel  # noqa: E402, F401
+from app.models.file_conversions import FileConversionModel  # noqa: E402, F401
 
 target_metadata = Base.metadata
 

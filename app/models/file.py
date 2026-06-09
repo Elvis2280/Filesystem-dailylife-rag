@@ -16,6 +16,7 @@ class FileModel(Base):
     original_filename = Column(String(255), nullable=False)
     storage_path = Column(String(500), nullable=False)
     file_size = Column(BigInteger, nullable=False)
+    file_extension = Column(String(20), nullable=False)
     mime_type = Column(String(100), nullable=False)
     status = Column(String(50), default="in_storage")
     extracted_text = Column(Text, nullable=True)

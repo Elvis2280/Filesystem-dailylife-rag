@@ -6,7 +6,6 @@ as a fallback from pdf_extractor.py (for scanned PDF pages).
 """
 
 from pathlib import Path
-
 from app.services.ai.ollama_sync import OllamaSyncClient
 
 

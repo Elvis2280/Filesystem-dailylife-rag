@@ -7,7 +7,7 @@ Unsupported types: raises ValueError with clear error message.
 
 from pathlib import Path
 
-from app.services.ocr.image_ocr import extract_image_text
+from app.services.ocr.file_ocr import extract_image_text
 from app.services.ocr.pdf_extractor import extract_pdf_text
 from app.services.ocr.utils import get_handler_category
 

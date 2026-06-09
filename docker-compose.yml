@@ -28,7 +28,7 @@ services:
     volumes:
       - .:/app
       - ./brain:/app/brain
-      - storage:/app/storage
+      - ./storage:/app/storage
     depends_on:
       redis:
         condition: service_healthy
@@ -57,7 +57,7 @@ services:
         condition: service_healthy
     volumes:
       - model_cache:/home/appuser/.cache
-      - storage:/app/storage
+      - ./storage:/app/storage
     networks:
       - backend
     restart: unless-stopped
@@ -158,5 +158,4 @@ networks:
 volumes:
   qdrant_data:
   model_cache:
-  storage:
   postgres_data:

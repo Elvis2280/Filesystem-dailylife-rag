@@ -6,9 +6,9 @@ They are not part of the main application flow.
 
 import base64
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, UploadFile, status, Depends
 
-from app.services.ai.ollama_client import OllamaClient
+from app.services.ai.ollama_client import OllamaClient, get_ollama_client
 from app.schemas.ollama import OllamaStatusResponse, OllamaFileOcrResponse
 from app.core.config import settings
 from app.api.dependencies.validators import validate_image_type
@@ -19,9 +19,8 @@ router = APIRouter(prefix="/ollama", tags=["Ollama"])
 @router.get(
     "/status", response_model=OllamaStatusResponse, status_code=status.HTTP_200_OK
 )
-async def ollama_status():
+async def ollama_status(ollama: OllamaClient = Depends(get_ollama_client)):
     """Endpoint to check Ollama service status."""
-    ollama = OllamaClient()
     health_status = await ollama.health_check()
     if health_status.is_reachable:
         return OllamaStatusResponse(
@@ -40,9 +39,9 @@ async def ollama_status():
 )
 async def ollama_ocr(
     file: UploadFile = File(...),
+    ollama: OllamaClient = Depends(get_ollama_client),
 ):
     """Endpoint to perform OCR on an uploaded Image using Ollama."""
-    ollama = OllamaClient()
     health_status = await ollama.health_check()
     if not health_status.is_reachable:
         raise HTTPException(

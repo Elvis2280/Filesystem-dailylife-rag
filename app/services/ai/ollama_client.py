@@ -77,6 +77,8 @@ class OllamaClient:
         Raises:
             RuntimeError: If the OCR request fails.
         """
+
+        # TODO: Move the prompt to a constant or config if it needs to be reused or modified in the future.
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.post(
@@ -114,3 +116,8 @@ class OllamaClient:
                 raise RuntimeError(
                     f"OCR failed (GLM model unavailable or error): {e}"
                 ) from e
+
+
+def get_ollama_client() -> OllamaClient:
+    """Dependency function to provide an instance of OllamaClient."""
+    return OllamaClient()

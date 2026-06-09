@@ -10,5 +10,6 @@ mkdir -p /app/brain/english/work /app/brain/english/personal \
          /app/brain/temp_disabled \
          /app/storage/uploads
 
-# Drop privileges and run the actual command
+export HOME=/home/appuser
+
 exec gosu appuser "$@"
