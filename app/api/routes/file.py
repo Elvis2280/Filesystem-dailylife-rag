@@ -1,8 +1,5 @@
-import asyncio
-import json
 import logging
 import uuid
-from datetime import datetime
 
 from celery.result import AsyncResult
 from fastapi import (
@@ -19,7 +16,7 @@ from fastapi import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.constant import ALLOWED_UPLOAD_MIME_TYPES, FilePipelineStage
+from app.core.constant import ALLOWED_UPLOAD_MIME_TYPES
 from app.core.database import get_db
 from app.core.redis_client import get_async_redis_client
 from app.core.websocket_manager import manager
@@ -32,19 +29,11 @@ from app.schemas.file import (
     FileUploadResponse,
 )
 from app.services.storage.file import convert_to_pdf, process_file_upload
+from app.services.websocket.file_status import stream_file_status
 from workers.celery_app import celery_app
 
 logger = logging.getLogger("memory_rag.routes.file")
 router = APIRouter(prefix="/api/v1", tags=["files"])
-
-# Map of worker `update_state(meta={"stage": ...})` values to FilePipelineStage
-# enum entries, used to reconstruct the current pipeline step from a
-# Celery AsyncResult when the WebSocket connects mid-task.
-_STAGE_NAME_MAP: dict[str, FilePipelineStage] = {
-    "pdf_conversion": FilePipelineStage.PDF_CONVERSION,
-    "image_conversion": FilePipelineStage.IMAGE_CONVERSION,
-    "ocr_processing": FilePipelineStage.OCR_PROCESSING,
-}
 
 
 def _is_valid_uuid(value: str) -> bool:
@@ -183,145 +172,17 @@ async def get_file_status(
 async def websocket_file_status(websocket: WebSocket, file_id: str):
     """WebSocket endpoint for real-time file processing status.
 
-    Subscribes to Redis pub/sub channel for progress updates,
-    sends heartbeat pings every 30s, and relays status messages
-    to the connected client.
+    Delegates the streaming logic to stream_file_status() in the
+    WebSocket service layer, which subscribes to Redis pub/sub and
+    relays progress updates until the task completes.
     """
-    pubsub = None
-    heartbeat_task: asyncio.Task | None = None
     await manager.connect(file_id, websocket)
-
-    async def _send_final_status(**kwargs):
-        await manager.send_message(
-            file_id,
-            {
-                "file_id": file_id,
-                "timestamp": datetime.now().isoformat(),
-                **kwargs,
-            },
-        )
-
     try:
-        redis_async = await get_async_redis_client()
-        task_id = await redis_async.get(f"file_task:{file_id}")
-        if not task_id:
-            await _send_final_status(
-                status="FAILURE",
-                step="0/4",
-                stage="failed",
-                message="No task found for this file",
-            )
-            return
-
-        task = AsyncResult(task_id, app=celery_app)
-
-        try:
-            task_state = task.state
-        except (ValueError, KeyError):
-            task_state = "FAILURE"
-
-        if task_state == "SUCCESS":
-            result = task.result
-            total_pages = len(result) if isinstance(result, list) else 0
-            await _send_final_status(
-                status="SUCCESS",
-                step="4/4",
-                stage="completed",
-                message="Processing completed successfully!",
-                total_pages=total_pages,
-                result=result,
-            )
-            return
-
-        if task_state == "FAILURE":
-            await _send_final_status(
-                status="FAILURE",
-                step="0/4",
-                stage="failed",
-                message=str(task.info) if task.info else "Unknown error",
-                error=str(task.info) if task.info else "Unknown error",
-            )
-            return
-
-        pubsub = redis_async.pubsub()
-        await pubsub.subscribe(f"file_updates:{file_id}")
-
-        # Catch-up: after subscribing, re-check task state so the client gets
-        # the current pipeline stage immediately, even if intermediate
-        # pub/sub messages were published before the subscription.
-        try:
-            task_state = task.state
-        except (ValueError, KeyError):
-            task_state = "FAILURE"
-
-        if task_state == "PROGRESS":
-            meta = task.info or {}
-            stage_name = meta.get("stage")
-            stage = _STAGE_NAME_MAP.get(stage_name, FilePipelineStage.PENDING)
-            await manager.send_message(
-                file_id,
-                {
-                    "status": "PROGRESS",
-                    "step": stage.step,
-                    "stage": stage.value,
-                    "message": stage.message,
-                    "file_id": file_id,
-                    "timestamp": datetime.now().isoformat(),
-                },
-            )
-            manager.update_step(file_id, stage.step)
-        else:
-            await manager.send_message(
-                file_id,
-                {
-                    "status": "PENDING",
-                    "step": "0/4",
-                    "stage": "pending",
-                    "message": "Waiting for task to start...",
-                    "file_id": file_id,
-                    "timestamp": datetime.now().isoformat(),
-                },
-            )
-
-        heartbeat_task = asyncio.create_task(manager.heartbeat(file_id))
-
-        async for message in pubsub.listen():
-            if message.get("type") != "message":
-                continue
-
-            data = json.loads(message["data"])
-            await manager.send_message(file_id, data)
-
-            step = data.get("step")
-            if step:
-                manager.update_step(file_id, step)
-
-            if data.get("status") in ["SUCCESS", "FAILURE"]:
-                break
-
+        await stream_file_status(file_id)
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        logger.exception("Websocket error for file %s", file_id)
-        await _send_final_status(
-            status="ERROR",
-            step="0/4",
-            stage="error",
-            message=f"WebSocket error: {str(e)}",
-        )
     finally:
         manager.disconnect(file_id)
-        if heartbeat_task is not None:
-            heartbeat_task.cancel()
-        if pubsub is not None:
-            try:
-                await pubsub.unsubscribe()
-            except Exception:
-                pass
-            try:
-                await pubsub.aclose()
-            except Exception:
-                pass
 
 
 @router.post(
