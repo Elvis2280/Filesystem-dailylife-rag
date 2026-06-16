@@ -6,12 +6,12 @@ They are not part of the main application flow.
 
 import base64
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status, Depends
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
-from app.services.ai.ollama_client import OllamaClient, get_ollama_client
-from app.schemas.ollama import OllamaStatusResponse, OllamaFileOcrResponse
-from app.core.config import settings
 from app.api.dependencies.validators import validate_image_type
+from app.core.config import settings
+from app.schemas.ollama import OllamaFileOcrResponse, OllamaStatusResponse
+from app.services.ai.ollama_client import OllamaClient, get_ollama_client
 
 router = APIRouter(prefix="/ollama", tags=["Ollama"])
 

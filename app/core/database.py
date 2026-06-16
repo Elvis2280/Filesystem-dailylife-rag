@@ -1,5 +1,7 @@
+from contextlib import contextmanager
+
 from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.core.config import settings
@@ -25,5 +27,24 @@ Base = declarative_base()
 
 
 async def get_db() -> AsyncSession:
+    """Provide an async database session for FastAPI dependency injection.
+
+    Yields:
+        AsyncSession: An async SQLAlchemy session.
+    """
     async with async_session() as session:
         yield session
+
+
+@contextmanager
+def get_sync_db():
+    """Provide a sync database session for Celery workers.
+
+    Yields:
+        Session: A sync SQLAlchemy session. Automatically closed on exit.
+    """
+    db = sync_session()
+    try:
+        yield db
+    finally:
+        db.close()

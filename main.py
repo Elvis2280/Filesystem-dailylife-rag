@@ -23,58 +23,31 @@ Startup Validation:
     Raises RuntimeError if any critical dependency is missing.
 """
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from app.core.config import settings
-from app.api.routes.workspace import router as workspace_router
 from app.api.routes.file import router as file_router
-
-from app.core.requirements_checker import validate_all
+from app.api.routes.workspace import router as workspace_router
+from app.core.config import settings
 from app.core.logging import configure_logging
-
-# CORS middleware is only needed in development for frontend dev servers
-if settings.IS_DEVELOPMENT:
-    from fastapi.middleware.cors import CORSMiddleware
-    from app.api.routes.ollama import router as ollama_router
-
-app = FastAPI(
-    title=settings.APP_NAME,
-    version="1.0.0",
-    docs_url=settings.DOCS_URL,
-    redoc_url=settings.REDOC_URL,
-)
-
-# Allow cross-origin requests from development frontend (e.g., localhost:3000)
-if settings.IS_DEVELOPMENT:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-# Allow API Endpoints if is_development is True
-if settings.IS_DEVELOPMENT:
-    app.include_router(ollama_router)
-
-# Register API route modules
-app.include_router(workspace_router)
-app.include_router(file_router)
+from app.core.requirements_checker import validate_all
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Validate all external services and directories on application startup.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Handle startup & shutdown lifecycle for the application.
 
-    Checks Redis, Qdrant, Postgres, and Ollama connectivity.
-    Ensures required base directories exist.
-    Raises RuntimeError if any critical service is unreachable.
+    Startup:
+        Validates all external services (Redis, Qdrant, Postgres, Ollama)
+        and required directories. Raises RuntimeError if any critical
+        dependency is missing.
 
-    Raises:
-        RuntimeError: If one or more required services are not reachable.
+    Shutdown:
+        Closes the async Redis client connection pool.
     """
+    # ── Startup ──
     logger = configure_logging(settings.LOG_LEVEL)
     report = await validate_all()
 
@@ -86,7 +59,6 @@ async def startup_event():
         logger.warning("Missing directories: %s", dir_report["paths"])
 
     # --- Service Connectivity Checks ---
-    # Collect all failures to report them at once, rather than failing early
     errors = []
     for endpoint, is_up in report["services_status"].items():
         if is_up:
@@ -103,7 +75,6 @@ async def startup_event():
         errors.append("Postgres DB connection failed")
 
     # --- Ollama Model Availability Check ---
-    # Ollama is optional for non-OCR features, so we warn instead of hard-failing
     from app.services.ai.ollama_client import OllamaClient
 
     ollama = OllamaClient()
@@ -128,6 +99,41 @@ async def startup_event():
     # Fail fast if any critical dependency is missing
     if errors:
         raise RuntimeError("Startup validation failed: " + "; ".join(errors))
+
+    yield  # ── Application runs here ──
+
+    # ── Shutdown ──
+    from app.core.redis_client import close_async_redis_client
+
+    await close_async_redis_client()
+
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version="1.0.0",
+    docs_url=settings.DOCS_URL,
+    redoc_url=settings.REDOC_URL,
+    lifespan=lifespan,
+)
+
+# Allow cross-origin requests from development frontend (e.g., localhost:3000)
+if settings.IS_DEVELOPMENT:
+    from fastapi.middleware.cors import CORSMiddleware
+
+    from app.api.routes.ollama import router as ollama_router
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.include_router(ollama_router)  # add the ollama models testing endpoints
+
+# Register API route modules
+app.include_router(workspace_router)
+app.include_router(file_router)
 
 
 @app.get("/")

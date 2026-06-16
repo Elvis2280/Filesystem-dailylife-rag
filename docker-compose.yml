@@ -2,7 +2,7 @@ services:
   nginx:
     image: nginx:alpine
     ports:
-      - '8080:80'
+      - "8080:80"
     volumes:
       - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -20,9 +20,9 @@ services:
         uvicorn main:app --host 0.0.0.0 --port 8000 --reload;
       fi"
     expose:
-      - '8000'
+      - "8000"
     ports:
-      - '5678:5678'
+      - "5678:5678"
     env_file:
       - .env
     volumes:
@@ -67,7 +67,7 @@ services:
           memory: 4G
 
   worker-gpu:
-    profiles: ['gpu']
+    profiles: ["gpu"]
     build: .
     command: celery -A workers.celery_app worker --loglevel=info --pool=threads
     env_file:
@@ -101,16 +101,16 @@ services:
       - redis
       - worker
     expose:
-      - '5555'
+      - "5555"
     ports:
-      - '5555:5555'
+      - "5555:5555"
     networks:
       - backend
 
   redis:
     image: redis:7-alpine
     healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -123,7 +123,7 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: ['CMD-SHELL', "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
+      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -140,7 +140,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U memoryrag']
+      test: ["CMD-SHELL", "pg_isready -U memoryrag"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -153,7 +153,6 @@ networks:
     driver: bridge
   backend:
     driver: bridge
-    internal: true
 
 volumes:
   qdrant_data:

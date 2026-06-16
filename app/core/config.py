@@ -37,10 +37,6 @@ class Settings(BaseSettings):
     def ACCESS_LOG(self) -> bool:
         return self.IS_DEVELOPMENT
 
-    @property
-    def CELERY_TASK_ALWAYS_EAGER(self) -> bool:
-        return self.IS_DEVELOPMENT
-
     # Embeddings
     EMBEDDING_DEVICE: str = Field(default="cpu")
 
@@ -70,7 +66,7 @@ class Settings(BaseSettings):
     OLLAMA_HOST: str = "localhost"
     OLLAMA_PORT: int = 11434
     OLLAMA_MODEL_OCR: str = "glm-ocr:latest"
-    OLLAMA_TIMEOUT: int = 120
+    OLLAMA_TIMEOUT: int = 600
 
     # Brain Storage
     BRAIN_PATH: str = "./brain"
@@ -113,6 +109,8 @@ class Settings(BaseSettings):
     UPLOAD_PATH: str = "./storage/uploads"
 
     # Celery
+    CELERY_TASK_ALWAYS_EAGER: bool = Field(default=False)
+
     @property
     def CELERY_BROKER_URL(self) -> str:
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/1"

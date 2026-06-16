@@ -36,7 +36,10 @@ class OllamaSyncClient:
         host = host or settings.OLLAMA_HOST
         port = port or settings.OLLAMA_PORT
         base_url = f"http://{host}:{port}"
-        self._client = Client(host=base_url)
+        self._client = Client(
+            host=base_url,
+            timeout=settings.OLLAMA_TIMEOUT,
+        )
 
     def generate_ocr(self, image_file: str | bytes) -> str:
         """Extract text from image using GLM-ocr vision model.
@@ -61,10 +64,16 @@ class OllamaSyncClient:
                     {
                         "role": "user",
                         "content": (
-                            "Extract all visible text from this image exactly as it appears. "
-                            "Preserve every word, number, and symbol. "
-                            "Do not reformat, summarize, or add any commentary. "
-                            "Return only the raw extracted text."
+                            "You are an expert document analysis system. Your task is to perform a strict, top-to-bottom reading "
+                            "of the provided page image and extract ALL visible text. Do not omit anything.\n\n"
+                            "Structure your output sequentially following the visual layout from top to bottom:\n\n"
+                            "1. [TOP TEXT]: Transcribe all initial plain document text, titles, or headers.\n"
+                            "2. [IMAGE/POSTER CONTENT]: Look inside the embedded graphic/poster. Transcribe all text found within it, "
+                            "including vertical text, actor names, titles, dates, and media formats.\n"
+                            "3. [LINKS & NAVIGATION]: Transcribe all links, standalone anchor texts, or navigation items below the image.\n"
+                            "4. [TABLE CONTENT]: Detect the data table. Reconstruct it exactly as a Markdown table with its columns and rows.\n\n"
+                            "Strict Rule: Scan the entire canvas. Do not stop writing until you have processed the elements below the image, "
+                            "especially the links and the final data table. Output only the transcribed content organized by these sections."
                         ),
                         "images": [image_file],
                     }
@@ -72,8 +81,6 @@ class OllamaSyncClient:
                 # Deterministic output: no randomness, large context for long documents
                 options={"num_ctx": 20480, "num_predict": 2048, "temperature": 0},
             )
-            return response.message.content
+            return str(response.message.content)
         except Exception as e:
-            raise RuntimeError(
-                f"OCR failed (GLM model unavailable or error): {e}"
-            ) from e
+            raise RuntimeError(f"OCR failed (GLM model unavailable or error): {e}")

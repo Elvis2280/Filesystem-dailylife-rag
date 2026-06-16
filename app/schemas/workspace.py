@@ -5,13 +5,15 @@ from pydantic import BaseModel, Field
 
 
 class WorkspaceCreateRequest(BaseModel):
+    """Request schema for workspace creation."""
+
     name: str = Field(..., min_length=1, max_length=100)
 
 
 class WorkspaceEntry(BaseModel):
     display_name: str
     slug: str
-    workspace_id: str
+    workspace_storage_key: str
 
 
 class WorkspaceResponse(BaseModel):

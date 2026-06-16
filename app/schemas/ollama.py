@@ -2,6 +2,8 @@ from pydantic import BaseModel, Field
 
 
 class OllamaStatusResponse(BaseModel):
+    """Response schema for Ollama health check."""
+
     is_reachable: bool = Field(
         ..., description="Whether the Ollama service is reachable"
     )
@@ -11,5 +13,7 @@ class OllamaStatusResponse(BaseModel):
 
 
 class OllamaFileOcrResponse(BaseModel):
+    """Response schema for Ollama OCR endpoint."""
+
     file_text: str = Field(..., description="The extracted text from the file")
     ollama_model: str = Field(..., description="The Ollama model used for OCR")

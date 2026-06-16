@@ -1,26 +1,37 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, String
+from sqlalchemy import DateTime, String
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 
 
 class WorkspaceModel(Base):
+    """SQLAlchemy model for workspace records.
+
+    Represents a bilingual workspace (English/Japanese) with a unique
+    storage key and slug, backed by directories under brain/.
+    """
+
     __tablename__ = "workspaces"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    display_name = Column(String, nullable=False)
-    slug = Column(String, unique=False, nullable=False)
-    storage_key = Column(String, unique=True, nullable=False)
-    status = Column(String, default="active")
-    created_at = Column(
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    slug: Mapped[str] = mapped_column(String, nullable=False)
+    storage_key: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="active")
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
-    updated_at = Column(
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
-    disabled_at = Column(DateTime(timezone=True), nullable=True)
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

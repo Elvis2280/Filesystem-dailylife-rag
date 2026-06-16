@@ -19,12 +19,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.constant import WorkspaceLanguage, WorkspaceStatus
 from app.core.logging import configure_logging
+from app.core.utility import generate_slug
 from app.models.disabled_workspace import DisabledWorkspace
 from app.models.workspace import WorkspaceModel
-from app.core.utility import generate_slug
-from app.core.config import settings
 
 logger = configure_logging("INFO")
 
@@ -59,7 +59,11 @@ async def get_workspaces_tree_json(
     workspaces = result.scalars().all()
 
     entries = [
-        {"display_name": w.display_name, "slug": w.slug, "workspace_id": w.storage_key}
+        {
+            "display_name": w.display_name,
+            "slug": w.slug,
+            "workspace_storage_key": w.storage_key,
+        }
         for w in workspaces
     ]
 

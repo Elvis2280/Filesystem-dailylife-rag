@@ -3,6 +3,14 @@ import sys
 
 
 def configure_logging(level: str = "INFO") -> logging.Logger:
+    """Configure and return the memory_rag logger with stdout handler.
+
+    Args:
+        level: Log level name (e.g. "DEBUG", "INFO", "WARNING").
+
+    Returns:
+        Configured logger instance for the memory_rag namespace.
+    """
     logger = logging.getLogger("memory_rag")
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
 

@@ -5,19 +5,21 @@ creates corresponding database records, and dispatches Celery OCR tasks
 for async processing.
 """
 
-from asyncio import subprocess
 import shutil
 import uuid
+from asyncio import subprocess, to_thread
 from pathlib import Path
 
-from app.models.file_conversions import FileConversionModel
-from app.services.ocr.utils import build_libreoffice_command
 from fastapi import UploadFile
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.redis_client import redis_client
 from app.models.file import FileModel
+from app.models.file_conversions import FileConversionModel
+from app.services.ocr.utils import build_libreoffice_command
+from workers.tasks.file_pipeline import process_file_upload as dispatch_pipeline_task
 
 
 async def process_file_upload(
@@ -53,8 +55,11 @@ async def process_file_upload(
     file_path = upload_dir / filename
 
     # Stream file to disk (avoids loading entire file into memory)
-    with open(file_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    def _sync_copy():
+        with open(file_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+    await to_thread(_sync_copy)
 
     file_size = file_path.stat().st_size
 
@@ -73,36 +78,10 @@ async def process_file_upload(
     await db.commit()
     await db.refresh(db_file)
 
-    return db_file
+    task = dispatch_pipeline_task.delay(str(file_id))
+    redis_client.setex(f"file_task:{file_id}", 1800, task.id)
 
-
-async def save_converted_file_metadata(
-    file_id: str,
-    db_session: AsyncSession,
-) -> FileConversionModel:
-    """Save metadata for a converted file (e.g., PDF generated from Office doc).
-
-    This is used to track the new file created by LibreOffice conversion,
-    which will then be processed by the OCR pipeline.
-
-    Args:
-        file_id: ID of the original uploaded file that was converted.
-        db_session: Async SQLAlchemy session for database operations.
-    Returns:
-        The created FileConversionModel instance with metadata about the converted file.
-    """
-    converted_result = await convert_to_pdf(file_id, db_session)
-    converted_metadata = FileConversionModel(
-        file_id=converted_result.file_id,
-        converted_file_path=converted_result.converted_file_path,
-        converted_mime_type=converted_result.converted_mime_type,
-        converted_to_extension=converted_result.converted_to_extension,
-    )
-    db_session.add(converted_metadata)
-    await db_session.commit()
-    await db_session.refresh(converted_metadata)
-
-    return converted_metadata
+    return db_file, task.id
 
 
 async def convert_to_pdf(file_id: str, db_session: AsyncSession) -> FileConversionModel:
@@ -168,5 +147,9 @@ async def convert_to_pdf(file_id: str, db_session: AsyncSession) -> FileConversi
         converted_mime_type="application/pdf",
         converted_to_extension="pdf",
     )
+
+    db_session.add(converted_pdf_metadata)
+    await db_session.commit()
+    await db_session.refresh(converted_pdf_metadata)
 
     return converted_pdf_metadata
