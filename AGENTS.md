@@ -34,10 +34,20 @@ ruff format .
 
 ## Pipeline
 
-1. Upload → detect language → store in `brain/english/` + `brain/japanese/`
+1. Upload → store in `brain/workspaces/{uuid}/files/`
 2. Quick embedding → Redis (hot data)
 3. Async: ocr → translation → chunking → embedding → indexing → Qdrant + Redis
 4. Bilingual: EN input → JA copy + both embeddings; JA input → EN copy + both embeddings
+
+## Workspace Directory Layout
+
+Each workspace gets a UUID-named directory under `brain/workspaces/{uuid}/` with:
+
+| Subdirectory | Purpose |
+|---|---|
+| `files/` | Uploaded files + LibreOffice PDF outputs |
+| `translation/english/` | English translation artifacts |
+| `translation/japanese/` | Japanese translation artifacts |
 
 ## Key Files
 
@@ -109,3 +119,10 @@ When reviewing code, act as a **senior developer mentor**. Teach by explaining *
 3. **Offer alternatives** - Show better code, not just criticism
 4. **Be constructive** - Acknowledge good patterns before pointing out issues
 5. **Reference docs** - Link to official best practices when relevant
+
+## Agent Workflow Rules
+
+### Tests are not updated automatically
+- Do NOT update or modify tests as part of a code change unless the user explicitly asks for it
+- If a code change would break existing tests, STOP and inform the user — do not silently update tests to match
+- Only update tests when the user says "update the tests", "fix the tests", or similar

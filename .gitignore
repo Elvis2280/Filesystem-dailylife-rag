@@ -107,3 +107,4 @@ logs/
 # Brain storage files
 brain
 test-brain/
+temp_storage

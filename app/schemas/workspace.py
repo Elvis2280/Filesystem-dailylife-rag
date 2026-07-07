@@ -1,39 +1,51 @@
 from datetime import datetime
+from typing import Union
 from uuid import UUID
 
 from pydantic import BaseModel, Field
 
 
 class WorkspaceCreateRequest(BaseModel):
-    """Request schema for workspace creation."""
-
     name: str = Field(..., min_length=1, max_length=100)
-
-
-class WorkspaceEntry(BaseModel):
-    display_name: str
-    slug: str
-    workspace_storage_key: str
 
 
 class WorkspaceResponse(BaseModel):
     id: UUID
-    display_name: str
+    name: str
     slug: str
     storage_key: str
     status: str
     created_at: datetime
     updated_at: datetime
-    tree: dict[str, list[WorkspaceEntry]] | None = None
+    deleted_at: datetime | None = None
 
     class Config:
         from_attributes = True
 
 
-class WorkspaceTreeResponse(BaseModel):
-    tree: dict[str, list[WorkspaceEntry]]
-
-
-class DeleteWorkspaceResponse(BaseModel):
+class DisableWorkspaceResponse(BaseModel):
     message: str
-    tree: dict[str, list[WorkspaceEntry]]
+
+
+class FileNode(BaseModel):
+    type: str = "file"
+    id: str
+    name: str
+
+
+class FolderNode(BaseModel):
+    type: str = "folder"
+    name: str
+    path: str
+    children: list[Union["FileNode", "FolderNode"]] = []
+
+
+class WorkspaceTreeNode(BaseModel):
+    id: str
+    name: str
+    status: str
+    children: list[FolderNode] = []
+
+
+class WorkspaceTreeResponse(BaseModel):
+    workspaces: list[WorkspaceTreeNode]

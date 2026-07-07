@@ -21,7 +21,7 @@ class FileConversionModel(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     file_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("files.id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False
     )
     converted_file_path: Mapped[str] = mapped_column(String, nullable=False)
     converted_mime_type: Mapped[str] = mapped_column(String(100), nullable=False)

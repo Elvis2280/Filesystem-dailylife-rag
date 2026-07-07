@@ -12,6 +12,7 @@ from app.core.constant import WorkspaceStatus
 from app.models.workspace import WorkspaceModel
 from app.models.disabled_workspace import DisabledWorkspace
 from sqlalchemy.exc import SQLAlchemyError
+import uuid
 
 
 @pytest.mark.unit
@@ -19,7 +20,8 @@ class TestCreateWorkspace:
     @pytest.mark.asyncio
     async def test_creates_workspace_and_returns_model(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
+            "app.services.storage.workspace.settings.BRAIN_WORKSPACES_PATH",
+            str(tmp_path),
         )
 
         db_session = AsyncMock()
@@ -36,20 +38,24 @@ class TestCreateWorkspace:
         result = await create_workspace("Test Project", db_session)
 
         assert isinstance(result, WorkspaceModel)
-        assert result.display_name == "Test Project"
+        assert result.name == "Test Project"
         assert result.slug == "test-project"
         assert isinstance(result.storage_key, str)
         assert len(result.storage_key) > 0
 
     @pytest.mark.asyncio
     async def test_raises_value_error_if_workspace_exists(self, monkeypatch, tmp_path):
+        ws_id = uuid.uuid4()
         monkeypatch.setattr(
-            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
+            "app.services.storage.workspace.settings.BRAIN_WORKSPACES_PATH",
+            str(tmp_path),
+        )
+        monkeypatch.setattr(
+            "app.services.storage.workspace.uuid.uuid4",
+            lambda: ws_id,
         )
 
-        slug = "test-project"
-        for lang in ["english", "japanese"]:
-            (tmp_path / lang / slug).mkdir(parents=True)
+        (tmp_path / str(ws_id)).mkdir(parents=True)
 
         db_session = AsyncMock()
         db_session.execute = AsyncMock(
@@ -64,11 +70,12 @@ class TestCreateWorkspace:
         self, monkeypatch, tmp_path
     ):
         monkeypatch.setattr(
-            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
+            "app.services.storage.workspace.settings.BRAIN_WORKSPACES_PATH",
+            str(tmp_path),
         )
 
         existing = WorkspaceModel(
-            display_name="Test Project",
+            name="Test Project",
             slug="test-project",
             storage_key="existing-key",
             status=WorkspaceStatus.DISABLED,
@@ -86,11 +93,12 @@ class TestCreateWorkspace:
         self, monkeypatch, tmp_path
     ):
         monkeypatch.setattr(
-            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
+            "app.services.storage.workspace.settings.BRAIN_WORKSPACES_PATH",
+            str(tmp_path),
         )
 
         existing = WorkspaceModel(
-            display_name="Test Project",
+            name="Test Project",
             slug="test-project",
             storage_key="existing-key",
             status=WorkspaceStatus.ACTIVE,
@@ -106,7 +114,8 @@ class TestCreateWorkspace:
     @pytest.mark.asyncio
     async def test_raises_runtime_error_on_db_failure(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
+            "app.services.storage.workspace.settings.BRAIN_WORKSPACES_PATH",
+            str(tmp_path),
         )
 
         db_session = AsyncMock()
@@ -123,7 +132,8 @@ class TestCreateWorkspace:
     @pytest.mark.asyncio
     async def test_creates_filesystem_directories(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
+            "app.services.storage.workspace.settings.BRAIN_WORKSPACES_PATH",
+            str(tmp_path),
         )
 
         db_session = AsyncMock()
@@ -137,63 +147,161 @@ class TestCreateWorkspace:
             return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
         )
 
-        await create_workspace("My Project", db_session)
+        result = await create_workspace("My Project", db_session)
 
-        assert (tmp_path / "english" / "my-project").exists()
-        assert (tmp_path / "japanese" / "my-project").exists()
+        ws_dir = tmp_path / str(result.id)
+        assert ws_dir.exists()
+        assert (ws_dir / "files").exists()
+        assert (ws_dir / "translation" / "english").exists()
+        assert (ws_dir / "translation" / "japanese").exists()
 
 
 @pytest.mark.unit
 class TestGetWorkspacesTreeJson:
     @pytest.mark.asyncio
-    async def test_returns_grouped_by_language(self):
+    async def test_returns_workspaces_with_nested_children(self):
+        ws_id_1 = uuid.uuid4()
+        ws_id_2 = uuid.uuid4()
+
         w1 = WorkspaceModel(
-            display_name="Project A",
+            id=ws_id_1,
+            name="Project A",
             slug="project-a",
             storage_key="key-a",
             status=WorkspaceStatus.ACTIVE,
         )
         w2 = WorkspaceModel(
-            display_name="Project B",
+            id=ws_id_2,
+            name="Project B",
             slug="project-b",
             storage_key="key-b",
             status=WorkspaceStatus.ACTIVE,
         )
 
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [w1, w2]
+        # Mock documents for workspace 1
+        doc1 = MagicMock()
+        doc1.id = uuid.uuid4()
+        doc1.original_filename = "resume.pdf"
+        doc1.language = "en"
+        doc1.status = "ocr_completed"
+
+        doc2 = MagicMock()
+        doc2.id = uuid.uuid4()
+        doc2.original_filename = "invoice.pdf"
+        doc2.language = "ja"
+        doc2.status = "in_storage"
+
+        # No documents for workspace 2
+        mock_workspace_result = MagicMock()
+        mock_workspace_result.scalars.return_value.all.return_value = [w1, w2]
+
+        mock_docs_result_1 = MagicMock()
+        mock_docs_result_1.scalars.return_value.all.return_value = [doc1, doc2]
+
+        mock_docs_result_2 = MagicMock()
+        mock_docs_result_2.scalars.return_value.all.return_value = []
 
         db_session = AsyncMock()
-        db_session.execute = AsyncMock(return_value=mock_result)
+        db_session.execute = AsyncMock(
+            side_effect=[
+                mock_workspace_result,
+                mock_docs_result_1,
+                mock_docs_result_2,
+            ]
+        )
 
         tree = await get_workspaces_tree_json(db_session)
 
-        assert "english" in tree
-        assert "japanese" in tree
-        assert len(tree["english"]) == 2
-        assert tree["english"][0] == {"display_name": "Project A", "slug": "project-a"}
-        assert tree["english"][1] == {"display_name": "Project B", "slug": "project-b"}
-        assert tree["japanese"] == tree["english"]
+        assert len(tree) == 2
+
+        ws1 = tree[0]
+        assert ws1["id"] == str(ws_id_1)
+        assert ws1["name"] == "Project A"
+        assert ws1["status"] == "active"
+        assert len(ws1["children"]) == 2
+
+        files_folder = ws1["children"][0]
+        assert files_folder["type"] == "folder"
+        assert files_folder["name"] == "Files"
+        assert files_folder["path"] == "files"
+        assert len(files_folder["children"]) == 2
+        assert files_folder["children"][0]["type"] == "file"
+        assert files_folder["children"][0]["name"] == "resume.pdf"
+        assert files_folder["children"][0]["language"] == "en"
+        assert files_folder["children"][0]["status"] == "ocr_completed"
+        assert files_folder["children"][1]["type"] == "file"
+        assert files_folder["children"][1]["name"] == "invoice.pdf"
+        assert files_folder["children"][1]["language"] == "ja"
+        assert files_folder["children"][1]["status"] == "in_storage"
+
+        translation_folder = ws1["children"][1]
+        assert translation_folder["name"] == "Translation"
+        assert translation_folder["path"] == "translation"
+        assert len(translation_folder["children"]) == 2
+        assert translation_folder["children"][0]["name"] == "English"
+        assert translation_folder["children"][0]["path"] == "translation/english"
+        assert translation_folder["children"][0]["children"] == []
+        assert translation_folder["children"][1]["name"] == "Japanese"
+        assert translation_folder["children"][1]["path"] == "translation/japanese"
+        assert translation_folder["children"][1]["children"] == []
+
+        ws2 = tree[1]
+        assert ws2["id"] == str(ws_id_2)
+        assert ws2["name"] == "Project B"
+        files_folder_2 = ws2["children"][0]
+        assert files_folder_2["children"] == []
 
     @pytest.mark.asyncio
-    async def test_filters_out_disabled_workspaces(self):
+    async def test_tree_id_is_workspace_uuid(self):
+        ws_id = uuid.uuid4()
+        workspace = WorkspaceModel(
+            id=ws_id,
+            name="Test",
+            slug="test",
+            storage_key="key",
+            status=WorkspaceStatus.ACTIVE,
+        )
+
+        mock_ws_result = MagicMock()
+        mock_ws_result.scalars.return_value.all.return_value = [workspace]
+
+        mock_docs_result = MagicMock()
+        mock_docs_result.scalars.return_value.all.return_value = []
+
+        db_session = AsyncMock()
+        db_session.execute = AsyncMock(side_effect=[mock_ws_result, mock_docs_result])
+
+        tree = await get_workspaces_tree_json(db_session)
+
+        assert len(tree) == 1
+        assert tree[0]["id"] == str(ws_id)
+        assert len(tree[0]["id"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_excludes_disabled_workspaces(self):
         w_active = WorkspaceModel(
-            display_name="Active",
+            id=uuid.uuid4(),
+            name="Active",
             slug="active",
             storage_key="key-active",
             status=WorkspaceStatus.ACTIVE,
         )
+        # Only active workspace is returned by the mock
+        mock_workspace_result = MagicMock()
+        mock_workspace_result.scalars.return_value.all.return_value = [w_active]
 
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [w_active]
+        mock_docs_result = MagicMock()
+        mock_docs_result.scalars.return_value.all.return_value = []
 
         db_session = AsyncMock()
-        db_session.execute = AsyncMock(return_value=mock_result)
+        db_session.execute = AsyncMock(
+            side_effect=[mock_workspace_result, mock_docs_result]
+        )
 
         tree = await get_workspaces_tree_json(db_session)
 
-        assert len(tree["english"]) == 1
-        assert tree["english"][0]["slug"] == "active"
+        assert len(tree) == 1
+        assert tree[0]["name"] == "Active"
 
 
 @pytest.mark.unit
@@ -206,12 +314,12 @@ class TestDisableWorkspace:
         )
 
         with pytest.raises(ValueError, match="Workspace does not exist"):
-            await disable_workspace("missing-slug", db_session)
+            await disable_workspace("00000000-0000-0000-0000-000000000001", db_session)
 
     @pytest.mark.asyncio
     async def test_raises_error_if_already_disabled(self):
         workspace = WorkspaceModel(
-            display_name="Test",
+            name="Test",
             slug="test-slug",
             storage_key="key-123",
             status=WorkspaceStatus.DISABLED,
@@ -223,130 +331,60 @@ class TestDisableWorkspace:
         )
 
         with pytest.raises(WorkspaceAlreadyDisabledError, match="already disabled"):
-            await disable_workspace("test-slug", db_session)
+            await disable_workspace("00000000-0000-0000-0000-000000000001", db_session)
 
     @pytest.mark.asyncio
-    async def test_raises_value_error_if_folders_not_found(self, monkeypatch, tmp_path):
+    async def test_disables_workspace_and_inserts_record(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
+            "app.services.storage.workspace.settings.BRAIN_WORKSPACES_PATH",
+            str(tmp_path),
         )
+
+        ws_id = uuid.uuid4()
+        (tmp_path / str(ws_id) / "files").mkdir(parents=True)
 
         workspace = WorkspaceModel(
-            display_name="Test",
+            id=ws_id,
+            name="Test",
             slug="test-slug",
             storage_key="key-123",
-            status=WorkspaceStatus.ACTIVE,
-        )
-
-        db_session = AsyncMock()
-        db_session.execute = AsyncMock(
-            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=workspace))
-        )
-
-        with pytest.raises(ValueError, match="Workspace folders do not exist"):
-            await disable_workspace("test-slug", db_session)
-
-    @pytest.mark.asyncio
-    async def test_disables_workspace_and_inserts_records(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(
-            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
-        )
-
-        (tmp_path / "english" / "test-slug").mkdir(parents=True)
-        (tmp_path / "japanese" / "test-slug").mkdir(parents=True)
-
-        workspace = WorkspaceModel(
-            display_name="Test",
-            slug="test-slug",
-            storage_key="key-123",
-            status=WorkspaceStatus.ACTIVE,
-        )
-
-        active_workspace = WorkspaceModel(
-            display_name="Other",
-            slug="other",
-            storage_key="other-key",
             status=WorkspaceStatus.ACTIVE,
         )
 
         lookup_result = MagicMock()
         lookup_result.scalar_one_or_none.return_value = workspace
 
-        tree_result = MagicMock()
-        tree_result.scalars.return_value.all.return_value = [active_workspace]
-
         db_session = AsyncMock()
         db_session.commit = AsyncMock()
         db_session.refresh = AsyncMock()
-        db_session.execute = AsyncMock(side_effect=[lookup_result, tree_result])
+        db_session.execute = AsyncMock(side_effect=[lookup_result])
         db_session.add = MagicMock()
 
-        display_name, tree = await disable_workspace("test-slug", db_session)
+        name = await disable_workspace(str(ws_id), db_session)
 
-        assert display_name == "Test"
-        assert len(tree["english"]) == 1
+        assert name == "Test"
         assert workspace.status == WorkspaceStatus.DISABLED
         assert workspace.disabled_at is not None
-        assert db_session.add.call_count == 2
+        assert db_session.add.call_count == 1
 
-        added_models = [call.args[0] for call in db_session.add.call_args_list]
-        assert all(isinstance(m, DisabledWorkspace) for m in added_models)
-        assert {m.lang for m in added_models} == {"english", "japanese"}
-        assert all(m.workspace_storage_key == "key-123" for m in added_models)
-
-    @pytest.mark.asyncio
-    async def test_partial_disable_when_one_folder_missing(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(
-            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
-        )
-
-        (tmp_path / "english" / "test-slug").mkdir(parents=True)
-
-        workspace = WorkspaceModel(
-            display_name="Test",
-            slug="test-slug",
-            storage_key="key-123",
-            status=WorkspaceStatus.ACTIVE,
-        )
-
-        active_workspace = WorkspaceModel(
-            display_name="Other",
-            slug="other",
-            storage_key="other-key",
-            status=WorkspaceStatus.ACTIVE,
-        )
-
-        lookup_result = MagicMock()
-        lookup_result.scalar_one_or_none.return_value = workspace
-
-        tree_result = MagicMock()
-        tree_result.scalars.return_value.all.return_value = [active_workspace]
-
-        db_session = AsyncMock()
-        db_session.commit = AsyncMock()
-        db_session.refresh = AsyncMock()
-        db_session.execute = AsyncMock(side_effect=[lookup_result, tree_result])
-        db_session.add = MagicMock()
-
-        display_name, tree = await disable_workspace("test-slug", db_session)
-
-        assert display_name == "Test"
-        added_models = [call.args[0] for call in db_session.add.call_args_list]
-        assert len(added_models) == 1
-        assert added_models[0].lang == "english"
-        assert workspace.status == WorkspaceStatus.DISABLED
-        assert workspace.disabled_at is not None
+        added_model = db_session.add.call_args[0][0]
+        assert isinstance(added_model, DisabledWorkspace)
+        assert added_model.lang == "all"
+        assert added_model.workspace_storage_key == "key-123"
 
     @pytest.mark.asyncio
     async def test_raises_runtime_error_on_db_failure(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            "app.services.storage.workspace.settings.BRAIN_PATH", str(tmp_path)
+            "app.services.storage.workspace.settings.BRAIN_WORKSPACES_PATH",
+            str(tmp_path),
         )
 
-        (tmp_path / "english" / "test-slug").mkdir(parents=True)
+        ws_id = uuid.uuid4()
+        (tmp_path / str(ws_id) / "files").mkdir(parents=True)
 
         workspace = WorkspaceModel(
-            display_name="Test",
+            id=ws_id,
+            name="Test",
             slug="test-slug",
             storage_key="key-123",
             status=WorkspaceStatus.ACTIVE,
@@ -360,6 +398,6 @@ class TestDisableWorkspace:
         db_session.add = MagicMock()
 
         with pytest.raises(RuntimeError, match="Failed to disable workspace"):
-            await disable_workspace("test-slug", db_session)
+            await disable_workspace(str(ws_id), db_session)
 
         db_session.rollback.assert_awaited_once()

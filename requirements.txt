@@ -33,6 +33,9 @@ alembic>=1.13.0
 torch>=2.8.0
 sentence-transformers>=3.4.0
 
+# Language Detection
+lingua-language-detector>=2.0.0
+
 # Obsidian / Storage
 PyYAML>=6.0.2
 python-frontmatter>=1.1.0

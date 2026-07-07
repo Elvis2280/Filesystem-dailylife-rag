@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.schemas.workspace import (
-    DeleteWorkspaceResponse,
+    DisableWorkspaceResponse,
     WorkspaceCreateRequest,
     WorkspaceResponse,
     WorkspaceTreeResponse,
@@ -28,13 +28,9 @@ async def create_workspace_endpoint(
     request: WorkspaceCreateRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new bilingual workspace with directories and database record."""
     try:
         workspace = await create_workspace(request.name, db)
-        tree = await get_workspaces_tree_json(db)
-        response = WorkspaceResponse.model_validate(workspace)
-        response.tree = tree
-        return response
+        return WorkspaceResponse.model_validate(workspace)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except RuntimeError as e:
@@ -51,26 +47,23 @@ async def create_workspace_endpoint(
 async def get_workspace_tree_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
-    """Retrieve all active workspaces grouped by language."""
     tree = await get_workspaces_tree_json(db)
-    return WorkspaceTreeResponse(tree=tree)
+    return WorkspaceTreeResponse(workspaces=tree)
 
 
-@router.delete(
-    "/workspace/{slug}",
-    response_model=DeleteWorkspaceResponse,
+@router.post(
+    "/workspace/{workspace_id}/disable",
+    response_model=DisableWorkspaceResponse,
     status_code=status.HTTP_200_OK,
 )
 async def disable_workspace_endpoint(
-    slug: str,
+    workspace_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """Soft-disable a workspace by marking it in the database."""
     try:
-        display_name, tree = await disable_workspace(slug, db)
-        return DeleteWorkspaceResponse(
-            message=f"Workspace '{display_name}' disabled successfully",
-            tree=tree,
+        name = await disable_workspace(workspace_id, db)
+        return DisableWorkspaceResponse(
+            message=f"Workspace '{name}' disabled successfully",
         )
     except WorkspaceAlreadyDisabledError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))

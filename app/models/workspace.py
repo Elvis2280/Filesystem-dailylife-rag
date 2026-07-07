@@ -9,18 +9,12 @@ from app.core.database import Base
 
 
 class WorkspaceModel(Base):
-    """SQLAlchemy model for workspace records.
-
-    Represents a bilingual workspace (English/Japanese) with a unique
-    storage key and slug, backed by directories under brain/.
-    """
-
     __tablename__ = "workspaces"
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
     slug: Mapped[str] = mapped_column(String, nullable=False)
     storage_key: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     status: Mapped[str] = mapped_column(String, default="active")
@@ -33,5 +27,8 @@ class WorkspaceModel(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
     disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

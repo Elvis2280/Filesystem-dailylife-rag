@@ -28,7 +28,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from app.api.routes.file import router as file_router
+from app.api.routes.document import router as document_router
 from app.api.routes.workspace import router as workspace_router
 from app.core.config import settings
 from app.core.logging import configure_logging
@@ -83,11 +83,25 @@ async def lifespan(app: FastAPI):
         logger.info(
             "Ollama: connected at %s:%d", settings.OLLAMA_HOST, settings.OLLAMA_PORT
         )
+        # OCR Model Check
         if settings.OLLAMA_MODEL_OCR in health_resp.available_models:
-            logger.info("Ollama model '%s' is available", settings.OLLAMA_MODEL_OCR)
+            logger.info(
+                "Ollama model '%s' for OCR is available", settings.OLLAMA_MODEL_OCR
+            )
         else:
             logger.warning(
-                "Ollama model '%s' is NOT available", settings.OLLAMA_MODEL_OCR
+                "Ollama model '%s' for OCR is NOT available", settings.OLLAMA_MODEL_OCR
+            )
+        # Translation model Check
+        if settings.OLLAMA_MODEL_TRANSLATION in health_resp.available_models:
+            logger.info(
+                "Ollama mode '%s' for Translation is available",
+                settings.OLLAMA_MODEL_TRANSLATION,
+            )
+        else:
+            logger.warning(
+                "Ollama model '%s' for Translation is NOT available",
+                settings.OLLAMA_MODEL_TRANSLATION,
             )
     else:
         logger.warning(
@@ -133,7 +147,7 @@ if settings.IS_DEVELOPMENT:
 
 # Register API route modules
 app.include_router(workspace_router)
-app.include_router(file_router)
+app.include_router(document_router)
 
 
 @app.get("/")

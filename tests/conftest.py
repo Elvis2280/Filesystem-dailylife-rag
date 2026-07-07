@@ -16,6 +16,7 @@ TEST_BRAIN.mkdir(parents=True)
 
 
 settings.BRAIN_PATH = str(TEST_BRAIN)
+settings.BRAIN_WORKSPACES_PATH = str(TEST_BRAIN / "workspaces")
 
 TEST_DB = "test_memoryrag"
 TEST_DATABASE_URL = (

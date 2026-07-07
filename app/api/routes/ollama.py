@@ -12,6 +12,7 @@ from app.api.dependencies.validators import validate_image_type
 from app.core.config import settings
 from app.schemas.ollama import OllamaFileOcrResponse, OllamaStatusResponse
 from app.services.ai.ollama_client import OllamaClient, get_ollama_client
+from app.services.ocr.file_ocr_llm import extract_image_text_async
 
 router = APIRouter(prefix="/ollama", tags=["Ollama"])
 
@@ -55,7 +56,7 @@ async def ollama_ocr(
     image_base64 = base64.b64encode(file_received).decode("utf-8")
 
     try:
-        ocr_result = await ollama.generate_ocr_async(image_base64)
+        ocr_result = await extract_image_text_async(image_base64)
         return OllamaFileOcrResponse(
             file_text=ocr_result,
             ollama_model=settings.OLLAMA_MODEL_OCR,

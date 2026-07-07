@@ -14,7 +14,7 @@ import fitz
 import pdfplumber
 from PIL import Image
 
-from app.services.ocr.file_ocr import extract_image_text
+from app.services.ocr.file_ocr_llm import extract_image_text
 from app.services.ocr.utils import is_text_too_small
 
 

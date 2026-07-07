@@ -5,11 +5,6 @@ from enum import Enum
 WORKSPACE_BASE_PATH = "./brain"
 
 
-class WorkspaceLanguage(str, Enum):
-    ENGLISH = "english"
-    JAPANESE = "japanese"
-
-
 class WorkspaceStatus(str, Enum):
     ACTIVE = "active"
     DISABLED = "disabled"
@@ -17,6 +12,11 @@ class WorkspaceStatus(str, Enum):
 
 class FileStatus(str, Enum):
     IN_STORAGE = "in_storage"
+    IN_TEMP_STORAGE = "in_temp_storage"
+    OCR_COMPLETED = "ocr_completed"
+    TRANSLATION_AND_FORMATTING = "translation_and_formatting"
+    TRANSLATION_COMPLETED = "translation_completed"
+    TRANSLATION_FAILED = "translation_failed"
 
 
 # --- File Pipeline Stages ---
@@ -27,18 +27,26 @@ class FilePipelineStage(str, Enum):
     PDF_CONVERSION = "pdf_conversion"
     IMAGE_CONVERSION = "image_conversion"
     OCR_PROCESSING = "ocr_processing"
+    LANGUAGE_DETECTION = "language_detection"
+    TRANSLATION = "translation"
+    CREATING_MARKDOWN_FILES = "creating_markdown_files"
+    SAVING_FILES = "saving_files"
     COMPLETED = "completed"
     FAILED = "failed"
 
     @property
     def step(self) -> str:
         _steps = {
-            "pending": "0/4",
-            "pdf_conversion": "1/4",
-            "image_conversion": "2/4",
-            "ocr_processing": "3/4",
-            "completed": "4/4",
-            "failed": "0/4",
+            "pending": "0/8",
+            "pdf_conversion": "1/8",
+            "image_conversion": "2/8",
+            "ocr_processing": "3/8",
+            "language_detection": "4/8",
+            "translation": "5/8",
+            "creating_markdown_files": "6/8",
+            "saving_files": "7/8",
+            "completed": "8/8",
+            "failed": "0/8",
         }
         return _steps[self.value]
 
@@ -49,6 +57,10 @@ class FilePipelineStage(str, Enum):
             "pdf_conversion": "Converting document to PDF...",
             "image_conversion": "Converting PDF to images...",
             "ocr_processing": "Running OCR...",
+            "language_detection": "Detecting language...",
+            "translation": "Translating content...",
+            "creating_markdown_files": "Creating Markdown files...",
+            "saving_files": "Saving files...",
             "completed": "Processing completed successfully!",
             "failed": "Processing failed.",
         }
@@ -113,3 +125,10 @@ ALLOWED_DOCUMENT_MIME_TYPES: set[str] = (
 ALLOWED_UPLOAD_MIME_TYPES: set[str] = (
     ALLOWED_DOCUMENT_MIME_TYPES | ALLOWED_IMAGE_MIME_TYPES
 )
+
+
+# -- Language Detection Types --
+class LanguageOptions(str, Enum):
+    ENGLISH = "EN"
+    JAPANESE = "JP"
+    MIXED = "MIXED"

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -66,28 +66,31 @@ class Settings(BaseSettings):
     OLLAMA_HOST: str = "localhost"
     OLLAMA_PORT: int = 11434
     OLLAMA_MODEL_OCR: str = "glm-ocr:latest"
+    OLLAMA_MODEL_FORMAT: str = "qwen3:14b"
+    OLLAMA_MODEL_TRANSLATION: str = "qwen3:14b"
     OLLAMA_TIMEOUT: int = 600
 
     # Brain Storage
     BRAIN_PATH: str = "./brain"
-    BRAIN_ENGLISH_PATH: str = "./brain/english"
-    BRAIN_JAPANESE_PATH: str = "./brain/japanese"
-
-    # Directory structure
-    BRAIN_WORKSPACE_SUBDIRS: list[str] = Field(
-        default=[
-            "english/work",
-            "english/personal",
-            "japanese/work",
-            "japanese/personal",
-        ]
-    )
+    BRAIN_WORKSPACES_PATH: str = "./brain/workspaces"
 
     @property
     def REQUIRED_DIRS(self) -> list[str]:
         """Full paths of all required directories for startup validation."""
-        base = Path(self.BRAIN_PATH)
-        return [str(base / subdir) for subdir in self.BRAIN_WORKSPACE_SUBDIRS]
+        return [self.BRAIN_PATH]
+
+    @property
+    def BRAIN_WORKSPACE_SUBDIRS(self) -> list[str]:
+        """Per-workspace subdirectory layout."""
+        return ["files", "translation/english", "translation/japanese"]
+
+    def workspace_path(self, workspace_id: str) -> str:
+        """Return the filesystem root for a workspace (creates subdirs on call)."""
+        return str(Path(self.BRAIN_WORKSPACES_PATH) / workspace_id)
+
+    def workspace_subdir(self, workspace_id: str, subdir: str) -> str:
+        """Return a specific subdirectory path under a workspace."""
+        return str(Path(self.BRAIN_WORKSPACES_PATH) / workspace_id / subdir)
 
     @property
     def DATABASE_URL(self) -> str:
@@ -107,6 +110,12 @@ class Settings(BaseSettings):
 
     # Upload Staging
     UPLOAD_PATH: str = "./storage/uploads"
+    TEMP_PATH: str = "./temp_storage"
+    TEMP_OCR_PATH: str = "./temp_storage/ocr"
+
+    def temp_workspace_path(self, workspace_id: str) -> str:
+        """Return the temp storage root for a workspace's staging files."""
+        return str(Path(self.TEMP_PATH) / workspace_id)
 
     # Celery
     CELERY_TASK_ALWAYS_EAGER: bool = Field(default=False)
@@ -118,6 +127,14 @@ class Settings(BaseSettings):
     @property
     def CELERY_RESULT_BACKEND(self) -> str:
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/2"
+
+    @model_validator(mode="after")
+    def _resolve_paths_to_absolute(self) -> "Settings":
+        self.BRAIN_PATH = str(Path(self.BRAIN_PATH).resolve())
+        self.BRAIN_WORKSPACES_PATH = str(Path(self.BRAIN_WORKSPACES_PATH).resolve())
+        self.TEMP_PATH = str(Path(self.TEMP_PATH).resolve())
+        self.TEMP_OCR_PATH = str(Path(self.TEMP_OCR_PATH).resolve())
+        return self
 
     class Config:
         env_file = ".env"

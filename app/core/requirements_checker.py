@@ -18,6 +18,17 @@ def ensure_directories() -> dict:
     }
 
 
+def ensure_workspace_dirs(workspace_id: str) -> list[str]:
+    """Create per-workspace subdirectories on disk. Return list of created paths."""
+    created = []
+    for subdir in settings.BRAIN_WORKSPACE_SUBDIRS:
+        path = Path(settings.workspace_subdir(workspace_id, subdir))
+        if not path.exists():
+            path.mkdir(parents=True)
+            created.append(str(path))
+    return created
+
+
 def check_service(host: str, port: int, timeout: int = 5) -> bool:
     """Check if a TCP service is reachable."""
     try:

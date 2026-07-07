@@ -1,8 +1,9 @@
 """Async Ollama client for FastAPI health checks and non-blocking calls.
 
-This module is used exclusively in async contexts (FastAPI event handlers,
-route handlers). For synchronous OCR calls in Celery workers, see
-app.services.ai.ollama_sync.
+This module is used in async contexts (FastAPI event handlers, route handlers).
+Provides a generic generate_async() method that accepts model, prompt, and image
+as parameters — callers are responsible for prompt engineering and model selection.
+For synchronous calls in Celery workers, see app.services.ai.ollama_sync.
 """
 
 import httpx
@@ -15,8 +16,8 @@ class OllamaClient:
     """Async HTTP client for Ollama server communication.
 
     Wraps httpx.AsyncClient for non-blocking API calls to the Ollama
-    server. Used primarily during application startup to verify model
-    availability.
+    server. Used during application startup to verify model availability
+    and in route handlers for async generation.
 
     Attributes:
         host: Ollama server hostname (default: from settings).
@@ -65,40 +66,39 @@ class OllamaClient:
                     available_models=[],
                 )
 
-    async def generate_ocr_async(self, image_base64: str) -> str:
-        """Asynchronously extract text from an image using the GLM-ocr vision model.
+    async def generate_async(
+        self, model: str, prompt: str, image_base64: str | None = None
+    ) -> str:
+        """Send an async chat request to Ollama with model, prompt, and optional image.
+
+        Uses deterministic settings (temperature=0, generous context window)
+        for reliable results. The caller is responsible for prompt
+        engineering and model selection.
 
         Args:
-            image_base64: Base64-encoded image string.
+            model: Ollama model name (e.g. "glm-ocr:latest").
+            prompt: Text prompt instructing the model.
+            image_base64: Base64-encoded image string. If None, a text-only
+                request is sent.
 
         Returns:
-            Extracted raw text from the image.
+            Generated text response from the model.
 
         Raises:
-            RuntimeError: If the OCR request fails.
+            RuntimeError: If the request fails.
         """
+        message = {"role": "user", "content": prompt}
+        if image_base64 is not None:
+            message["images"] = [image_base64]
 
-        # TODO: Move the prompt to a constant or config if it needs to be reused or modified in the future.
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.post(
                     f"{self.base_url}/api/chat",
                     json={
-                        "model": settings.OLLAMA_MODEL_OCR,
+                        "model": model,
                         "stream": False,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": (
-                                    "Extract all visible text from this image exactly as it appears. "
-                                    "Preserve every word, number, and symbol. "
-                                    "Do not reformat, summarize, or add any commentary. "
-                                    "Return only the raw extracted text."
-                                ),
-                                "images": [image_base64],
-                            }
-                        ],
-                        # Deterministic output: no randomness, large context for long documents
+                        "messages": [message],
                         "options": {
                             "num_ctx": 20480,
                             "num_predict": 2048,
@@ -110,12 +110,10 @@ class OllamaClient:
                 return response.json().get("message", {}).get("content", "")
             except httpx.HTTPStatusError as e:
                 raise RuntimeError(
-                    f"OCR failed (HTTP error {e.response.status_code}): {e.response.text}"
+                    f"Ollama generation failed (HTTP error {e.response.status_code}): {e.response.text}"
                 ) from e
             except Exception as e:
-                raise RuntimeError(
-                    f"OCR failed (GLM model unavailable or error): {e}"
-                ) from e
+                raise RuntimeError(f"Ollama generation failed: {e}") from e
 
 
 def get_ollama_client() -> OllamaClient:
