@@ -26,6 +26,7 @@ Startup Validation:
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes.document import router as document_router
@@ -130,20 +131,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Allow cross-origin requests from development frontend (e.g., localhost:3000)
-if settings.IS_DEVELOPMENT:
-    from fastapi.middleware.cors import CORSMiddleware
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Register ollama routes only in dev mode
+if settings.IS_DEVELOPMENT:
     from app.api.routes.ollama import router as ollama_router
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-    app.include_router(ollama_router)  # add the ollama models testing endpoints
+    app.include_router(ollama_router)
 
 # Register API route modules
 app.include_router(workspace_router)

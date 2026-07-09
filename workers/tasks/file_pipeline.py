@@ -61,6 +61,15 @@ def _publish_status(
     )
 
 
+def _set_status(
+    document: Document,
+    file_status: FileStatus,
+    db_session,
+):
+    document.status = file_status.value
+    db_session.commit()
+
+
 @celery_app.task(
     name="workers.tasks.process_file_upload",
     bind=True,
@@ -86,8 +95,21 @@ def process_file_upload(self, document_id: str) -> None:
             ).lower()
             is_pdf = _is_pdf(document.mime_type)
 
+            _set_status(document, FileStatus.FILE_UPLOADED, db_session)
+            _publish_status(
+                document_id,
+                FilePipelineStage.PENDING,
+                message="File uploaded, starting processing...",
+                status=FileStatus.FILE_UPLOADED.value,
+            )
+
             if not is_pdf and ext not in ALLOWED_IMAGE_EXTENSIONS:
-                _publish_status(document_id, FilePipelineStage.PDF_CONVERSION)
+                _set_status(document, FileStatus.FILE_CONVERSION_STARTED, db_session)
+                _publish_status(
+                    document_id,
+                    FilePipelineStage.PDF_CONVERSION,
+                    status=FileStatus.FILE_CONVERSION_STARTED.value,
+                )
                 self.update_state(
                     state="PROGRESS",
                     meta={"stage": "pdf_conversion"},
@@ -98,7 +120,6 @@ def process_file_upload(self, document_id: str) -> None:
                 converted_pdf_result = convert_to_pdf(document_id, db_session)
                 ext = f".{converted_pdf_result.converted_to_extension.lower()}"
 
-                # Capture page_count for non-PDFs after LibreOffice conversion
                 try:
                     pdf_path = converted_pdf_result.converted_file_path
                     page_count = _count_pdf_pages(pdf_path)
@@ -109,8 +130,20 @@ def process_file_upload(self, document_id: str) -> None:
                         "Could not read page_count from generated PDF: %s", exc
                     )
 
+                _set_status(document, FileStatus.FILE_CONVERSION_FINISHED, db_session)
+                _publish_status(
+                    document_id,
+                    FilePipelineStage.PDF_CONVERSION,
+                    message="File conversion finished.",
+                    status=FileStatus.FILE_CONVERSION_FINISHED.value,
+                )
+
             if ext == ".pdf" or is_pdf:
-                _publish_status(document_id, FilePipelineStage.IMAGE_CONVERSION)
+                _publish_status(
+                    document_id,
+                    FilePipelineStage.IMAGE_CONVERSION,
+                    status=FileStatus.FILE_CONVERSION_FINISHED.value,
+                )
                 self.update_state(
                     state="PROGRESS",
                     meta={"stage": "image_conversion"},
@@ -126,8 +159,6 @@ def process_file_upload(self, document_id: str) -> None:
 
             if ext in ALLOWED_IMAGE_EXTENSIONS:
                 images_path = return_list_images_path(document_id, db_session)
-                document.status = "processing_ocr"
-                db_session.commit()
 
                 if len(images_path) <= 0:
                     raise ValueError("No image paths available for OCR processing")
@@ -136,7 +167,7 @@ def process_file_upload(self, document_id: str) -> None:
                     document.page_count is not None
                     and len(images_path) != document.page_count
                 ):
-                    document.status = "ocr_failed"
+                    document.status = FileStatus.FAILED.value
                     db_session.commit()
                     raise RuntimeError(
                         f"Image count mismatch for document {document_id}: "
@@ -144,11 +175,14 @@ def process_file_upload(self, document_id: str) -> None:
                     )
 
                 total_pages = len(images_path)
+
+                _set_status(document, FileStatus.OCR_STARTED, db_session)
                 _publish_status(
                     document_id,
                     FilePipelineStage.OCR_PROCESSING,
                     message=f"Starting OCR on {total_pages} pages...",
                     total_pages=total_pages,
+                    status=FileStatus.OCR_STARTED.value,
                 )
                 self.update_state(
                     state="PROGRESS",
@@ -162,6 +196,7 @@ def process_file_upload(self, document_id: str) -> None:
                         message=f"Processing page {idx + 1} of {total_pages}...",
                         page_number=idx + 1,
                         total_pages=total_pages,
+                        status=FileStatus.OCR_STARTED.value,
                     )
                     try:
                         text = extract_image_text(image_path)
@@ -191,66 +226,80 @@ def process_file_upload(self, document_id: str) -> None:
                         )
                         continue
 
-                document.status = FileStatus.OCR_COMPLETED.value
-                db_session.commit()
+                _set_status(document, FileStatus.OCR_FINISHED, db_session)
+                _publish_status(
+                    document_id,
+                    FilePipelineStage.OCR_PROCESSING,
+                    message=f"OCR finished! {total_pages} pages processed.",
+                    total_pages=total_pages,
+                    status=FileStatus.OCR_FINISHED.value,
+                )
 
-                # Translation and formatting
-                document.status = FileStatus.TRANSLATION_AND_FORMATTING.value
-                db_session.commit()
+            _set_status(
+                document, FileStatus.TRANSLATION_AND_FORMATTING_STARTED, db_session
+            )
+            _publish_status(
+                document_id,
+                FilePipelineStage.TRANSLATION,
+                message="Starting translation and formatting...",
+                status=FileStatus.TRANSLATION_AND_FORMATTING_STARTED.value,
+            )
+            self.update_state(
+                state="PROGRESS",
+                meta={"stage": "translation_and_formatting"},
+            )
 
+            try:
+                format_all_markdown(
+                    str(document.workspace_id),
+                    document_id,
+                    db_session,
+                )
+
+                _set_status(
+                    document,
+                    FileStatus.TRANSLATION_AND_FORMATTING_FINISHED,
+                    db_session,
+                )
                 _publish_status(
                     document_id,
                     FilePipelineStage.TRANSLATION,
-                    message="Starting translation and formatting...",
-                )
-                self.update_state(
-                    state="PROGRESS",
-                    meta={"stage": "translation_and_formatting"},
+                    message="Translation and formatting finished.",
+                    status=FileStatus.TRANSLATION_AND_FORMATTING_FINISHED.value,
                 )
 
-                try:
-                    format_all_markdown(
-                        str(document.workspace_id),
-                        document_id,
-                        db_session,
-                    )
+                _set_status(document, FileStatus.COMPLETED, db_session)
+                _publish_status(
+                    document_id,
+                    FilePipelineStage.COMPLETED,
+                    message=(f"Processing completed! {total_pages} pages processed."),
+                    total_pages=total_pages,
+                    status=FileStatus.COMPLETED.value,
+                )
 
-                    document.status = FileStatus.TRANSLATION_COMPLETED.value
-                    db_session.commit()
-
-                    _publish_status(
-                        document_id,
-                        FilePipelineStage.COMPLETED,
-                        message=(
-                            f"Processing completed! {total_pages} pages processed."
-                        ),
-                        total_pages=total_pages,
-                        status="SUCCESS",
-                    )
-
-                    return None
-                except Exception as format_error:
-                    document.status = FileStatus.TRANSLATION_FAILED.value
-                    db_session.commit()
-                    logging.getLogger("memory_rag.pipeline").error(
-                        "Translation/formatting failed for document %s: %s",
-                        document_id,
-                        format_error,
-                    )
-                    _publish_status(
-                        document_id,
-                        FilePipelineStage.FAILED,
-                        message=(f"Translation/formatting failed: {format_error}"),
-                        status="FAILURE",
-                    )
-                    raise
+                return None
+            except Exception as format_error:
+                document.status = FileStatus.FAILED.value
+                db_session.commit()
+                logging.getLogger("memory_rag.pipeline").error(
+                    "Translation/formatting failed for document %s: %s",
+                    document_id,
+                    format_error,
+                )
+                _publish_status(
+                    document_id,
+                    FilePipelineStage.FAILED,
+                    message=(f"Translation/formatting failed: {format_error}"),
+                    status=FileStatus.FAILED.value,
+                )
+                raise
 
     except Exception as e:
         _publish_status(
             document_id,
             FilePipelineStage.FAILED,
             message=str(e),
-            status="FAILURE",
+            status=FileStatus.FAILED.value,
         )
         self.update_state(
             state="FAILURE",

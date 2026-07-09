@@ -22,7 +22,7 @@ class Document(Base):
     mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
     language: Mapped[str | None] = mapped_column(String(10), nullable=True)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    status: Mapped[str] = mapped_column(String(50), default="in_storage")
+    status: Mapped[str] = mapped_column(String(50), default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

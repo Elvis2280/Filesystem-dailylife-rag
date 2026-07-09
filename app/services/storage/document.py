@@ -78,7 +78,6 @@ async def process_document_upload(
         stored_filename=stored_filename,
         mime_type=file.content_type or "application/octet-stream",
         page_count=page_count,
-        status="in_storage" if is_pdf else "in_temp_storage",
     )
     db.add(document)
     await db.commit()

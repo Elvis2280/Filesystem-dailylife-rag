@@ -11,12 +11,15 @@ class WorkspaceStatus(str, Enum):
 
 
 class FileStatus(str, Enum):
-    IN_STORAGE = "in_storage"
-    IN_TEMP_STORAGE = "in_temp_storage"
-    OCR_COMPLETED = "ocr_completed"
-    TRANSLATION_AND_FORMATTING = "translation_and_formatting"
-    TRANSLATION_COMPLETED = "translation_completed"
-    TRANSLATION_FAILED = "translation_failed"
+    FILE_UPLOADED = "file_uploaded"
+    FILE_CONVERSION_STARTED = "file_conversion_started"
+    FILE_CONVERSION_FINISHED = "file_conversion_finished"
+    OCR_STARTED = "ocr_started"
+    OCR_FINISHED = "ocr_finished"
+    TRANSLATION_AND_FORMATTING_STARTED = "translation_and_formatting_started"
+    TRANSLATION_AND_FORMATTING_FINISHED = "translation_and_formatting_finished"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 # --- File Pipeline Stages ---

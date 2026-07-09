@@ -31,6 +31,7 @@ class FileNode(BaseModel):
     type: str = "file"
     id: str
     name: str
+    original_name: str
 
 
 class FolderNode(BaseModel):

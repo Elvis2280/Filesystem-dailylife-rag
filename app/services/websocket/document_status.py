@@ -8,6 +8,7 @@ or fails.
 import json
 import logging
 
+from app.core.constant import FileStatus
 from app.core.redis_client import redis_client
 from app.core.websocket_manager import manager
 
@@ -23,7 +24,10 @@ async def stream_document_status(document_id: str) -> None:
                 continue
             data = json.loads(message["data"])
             await manager.send(document_id, data)
-            if data.get("status") in ("SUCCESS", "FAILURE"):
+            if data.get("status") in (
+                FileStatus.COMPLETED.value,
+                FileStatus.FAILED.value,
+            ):
                 break
     finally:
         pubsub.unsubscribe(f"document_updates:{document_id}")
