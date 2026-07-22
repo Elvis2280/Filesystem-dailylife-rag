@@ -5,8 +5,10 @@ exists as a UUID-named directory under brain/workspaces/{uuid}/ with
 subdirectories for files, translations, etc.
 """
 
+import re
 import shutil
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,14 +17,14 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.constant import WorkspaceStatus
+from app.core.constant import DocumentsType, WorkspaceStatus
 from app.core.logging import configure_logging
 from app.core.requirements_checker import ensure_workspace_dirs
 from app.core.utility import generate_slug
 from app.models.disabled_workspace import DisabledWorkspace
+from app.models.document import Document
+from app.models.file_conversions import FileConversionModel
 from app.models.workspace import WorkspaceModel
-
-logger = configure_logging("INFO")
 
 logger = configure_logging("INFO")
 
@@ -34,27 +36,65 @@ class WorkspaceAlreadyDisabledError(Exception):
 async def _build_workspace_children(
     workspace_id: str, db_session: AsyncSession
 ) -> list[dict]:
+    docs_result = await db_session.execute(
+        select(Document)
+        .where(Document.workspace_id == workspace_id)
+        .order_by(Document.created_at, Document.original_filename)
+    )
+    documents = docs_result.scalars().all()
+
+    if not documents:
+        return _empty_workspace_tree()
+
+    conversions = (
+        (
+            await db_session.execute(
+                select(FileConversionModel).where(
+                    FileConversionModel.file_id.in_([d.id for d in documents])
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    by_doc: dict[str, list[FileConversionModel]] = defaultdict(list)
+    for c in conversions:
+        by_doc[str(c.file_id)].append(c)
+
+    doc_name_map = {str(d.id): d.original_filename for d in documents}
+
+    document_nodes = []
+    for doc in documents:
+        doc_id_str = str(doc.id)
+        doc_convs = by_doc.get(doc_id_str, [])
+        children = _build_doc_children(doc_convs, doc.original_filename)
+        document_nodes.append(
+            {
+                "type": "document",
+                "id": doc_id_str,
+                "name": doc.original_filename,
+                "original_name": doc.original_filename,
+                "status": doc.status,
+                "language": doc.language,
+                "mime_type": doc.mime_type,
+                "page_count": doc.page_count,
+                "created_at": doc.created_at.isoformat() if doc.created_at else None,
+                "children": children,
+            }
+        )
+
+    en_nodes, ja_nodes = _translation_nodes(by_doc, doc_name_map)
+
     workspace_path = Path(settings.workspace_path(workspace_id))
-
-    def _list_files(directory: Path) -> list[dict]:
-        if not directory.exists() or not directory.is_dir():
-            return []
-        return [
-            {"type": "file", "id": entry.name, "name": entry.name}
-            for entry in sorted(directory.iterdir())
-            if entry.is_file()
-        ]
-
-    files_dir = workspace_path / "files"
-    translation_en_dir = workspace_path / "translation" / "english"
-    translation_jp_dir = workspace_path / "translation" / "japanese"
+    _log_orphan_warnings(workspace_id, workspace_path, documents, conversions)
 
     return [
         {
             "type": "folder",
             "name": "Files",
             "path": "files",
-            "children": _list_files(files_dir),
+            "children": document_nodes,
         },
         {
             "type": "folder",
@@ -65,17 +105,200 @@ async def _build_workspace_children(
                     "type": "folder",
                     "name": "English",
                     "path": "translation/english",
-                    "children": _list_files(translation_en_dir),
+                    "children": en_nodes,
                 },
                 {
                     "type": "folder",
                     "name": "Japanese",
                     "path": "translation/japanese",
-                    "children": _list_files(translation_jp_dir),
+                    "children": ja_nodes,
                 },
             ],
         },
     ]
+
+
+def _empty_workspace_tree() -> list[dict]:
+    return [
+        {"type": "folder", "name": "Files", "path": "files", "children": []},
+        {
+            "type": "folder",
+            "name": "Translation",
+            "path": "translation",
+            "children": [
+                {
+                    "type": "folder",
+                    "name": "English",
+                    "path": "translation/english",
+                    "children": [],
+                },
+                {
+                    "type": "folder",
+                    "name": "Japanese",
+                    "path": "translation/japanese",
+                    "children": [],
+                },
+            ],
+        },
+    ]
+
+
+def _page_number_from_path(path: str) -> int | None:
+    m = re.search(r"_page_(\d+)\.md$", path)
+    return int(m.group(1)) if m else None
+
+
+def _build_doc_children(
+    convs: list[FileConversionModel],
+    original_name: str,
+) -> list[dict]:
+    out = []
+    pdf_rows = [
+        c
+        for c in convs
+        if c.document_type
+        in (DocumentsType.ORIGINAL_FILE.value, DocumentsType.CONVERTED_PDF.value)
+    ]
+    pdf_rows.sort(key=lambda c: c.created_at or datetime.min)
+    for c in pdf_rows:
+        ext = c.converted_to_extension or ""
+        out.append(
+            {
+                "type": "file",
+                "id": str(c.id),
+                "name": f"{original_name}.{ext}" if ext else original_name,
+                "original_name": original_name,
+                "document_id": str(c.file_id),
+                "kind": "pdf",
+                "page_number": None,
+                "mime_type": c.converted_mime_type,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+        )
+
+    md_rows = [c for c in convs if c.document_type == DocumentsType.MD_ORIGINAL.value]
+    md_rows.sort(key=lambda c: _page_number_from_path(c.converted_file_path) or 0)
+    for c in md_rows:
+        ext = c.converted_to_extension or ""
+        out.append(
+            {
+                "type": "file",
+                "id": str(c.id),
+                "name": f"{original_name}.{ext}" if ext else original_name,
+                "original_name": original_name,
+                "document_id": str(c.file_id),
+                "kind": "markdown",
+                "page_number": _page_number_from_path(c.converted_file_path),
+                "mime_type": c.converted_mime_type,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+        )
+    return out
+
+
+def _translation_nodes(
+    by_doc: dict[str, list[FileConversionModel]],
+    doc_name_map: dict[str, str],
+) -> tuple[list[dict], list[dict]]:
+    en_groups: dict[str, list[FileConversionModel]] = defaultdict(list)
+    ja_groups: dict[str, list[FileConversionModel]] = defaultdict(list)
+
+    for doc_id_str, convs in by_doc.items():
+        for c in convs:
+            if c.document_type != DocumentsType.MD_TRANSLATED.value:
+                continue
+            if "/translation/english/" in c.converted_file_path:
+                en_groups[doc_id_str].append(c)
+            elif "/translation/japanese/" in c.converted_file_path:
+                ja_groups[doc_id_str].append(c)
+
+    en_nodes = _build_lang_nodes(en_groups, doc_name_map, "en")
+    ja_nodes = _build_lang_nodes(ja_groups, doc_name_map, "ja")
+    return en_nodes, ja_nodes
+
+
+def _build_lang_nodes(
+    groups: dict[str, list[FileConversionModel]],
+    doc_name_map: dict[str, str],
+    lang: str,
+) -> list[dict]:
+    nodes = []
+    for doc_id_str, convs in groups.items():
+        if not convs:
+            continue
+        last = max((c.created_at for c in convs if c.created_at), default=None)
+        original_name = doc_name_map.get(doc_id_str, doc_id_str)
+        nodes.append(
+            {
+                "type": "file",
+                "id": f"{doc_id_str}:{lang}",
+                "name": f"{original_name}.md",
+                "original_name": original_name,
+                "document_id": doc_id_str,
+                "kind": "markdown",
+                "language": lang,
+                "page_count": len(convs),
+                "created_at": last.isoformat() if last else None,
+            }
+        )
+    nodes.sort(key=lambda n: n["name"])
+    return nodes
+
+
+def _log_orphan_warnings(
+    workspace_id: str,
+    workspace_path: Path,
+    documents: list[Document],
+    conversions: list[FileConversionModel],
+) -> None:
+    files_dir = workspace_path / "files"
+    if files_dir.is_dir():
+        tracked_types = {
+            DocumentsType.ORIGINAL_FILE.value,
+            DocumentsType.CONVERTED_PDF.value,
+            DocumentsType.MD_ORIGINAL.value,
+        }
+        expected_filenames = {
+            Path(c.converted_file_path).name
+            for c in conversions
+            if c.document_type in tracked_types
+        }
+        expected_filenames |= {
+            doc.stored_filename for doc in documents if doc.stored_filename
+        }
+        on_disk = {f.name for f in files_dir.iterdir() if f.is_file()}
+        orphans = on_disk - expected_filenames
+        if orphans:
+            logger.warning(
+                "Workspace %s has %d orphan files in files/: %s",
+                workspace_id,
+                len(orphans),
+                sorted(orphans),
+            )
+
+    for lang_subdir, lang_path_segment in [
+        ("english", "/translation/english/"),
+        ("japanese", "/translation/japanese/"),
+    ]:
+        trans_dir = workspace_path / "translation" / lang_subdir
+        if not trans_dir.is_dir():
+            continue
+        expected_paths = {
+            c.converted_file_path
+            for c in conversions
+            if c.document_type == DocumentsType.MD_TRANSLATED.value
+            and lang_path_segment in c.converted_file_path
+        }
+        on_disk = {str(f) for f in trans_dir.iterdir() if f.is_file()}
+        orphans = on_disk - expected_paths
+        if orphans:
+            logger.warning(
+                "Workspace %s has %d orphan files in translation/%s/: %s",
+                workspace_id,
+                len(orphans),
+                lang_subdir,
+                sorted(orphans),
+            )
 
 
 async def get_workspaces_tree_json(

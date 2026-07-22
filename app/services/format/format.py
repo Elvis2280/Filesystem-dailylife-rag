@@ -6,8 +6,9 @@ from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.constant import LanguageOptions
+from app.core.constant import DocumentsType, LanguageOptions
 from app.models.file_conversions import FileConversionModel
+from app.models.translation import TranslationModel
 from app.services.format.format_llm import format_markdown
 from app.services.language.translation import translate_content
 
@@ -97,10 +98,26 @@ def format_all_markdown(
                 continue
 
             md_path = translation_dirs[lang] / f"{base_filename}.md"
-            _save_md(md_path, translated_md, document_id, db_session)
+            _save_md(
+                md_path,
+                translated_md,
+                document_id,
+                db_session,
+                workspace_id=workspace_id,
+                language=lang.value,
+                page_number=page_number,
+            )
 
 
-def _save_md(path: Path, content: str, document_id: str, db_session: Session) -> None:
+def _save_md(
+    path: Path,
+    content: str,
+    document_id: str,
+    db_session: Session,
+    workspace_id: str | None = None,
+    language: str | None = None,
+    page_number: int | None = None,
+) -> None:
     if not path.exists():
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -130,15 +147,33 @@ def _save_md(path: Path, content: str, document_id: str, db_session: Session) ->
     if existing:
         return
 
+    doc_type = (
+        DocumentsType.MD_TRANSLATED.value
+        if workspace_id and language
+        else DocumentsType.MD_ORIGINAL.value
+    )
     record = FileConversionModel(
         file_id=document_id,
         converted_file_path=str(path),
         converted_mime_type="text/markdown",
         converted_to_extension="md",
+        document_type=doc_type,
     )
     db_session.add(record)
     db_session.commit()
     db_session.refresh(record)
+
+    if workspace_id and language:
+        translation = TranslationModel(
+            document_id=document_id,
+            workspace_id=workspace_id,
+            language=language,
+            file_path=str(path),
+            page_number=page_number,
+        )
+        db_session.add(translation)
+        db_session.commit()
+        db_session.refresh(translation)
 
 
 def _extract_page_number(txt_path: str, document_id: str) -> int:

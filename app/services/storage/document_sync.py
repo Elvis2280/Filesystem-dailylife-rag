@@ -10,7 +10,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.constant import ALLOWED_IMAGE_EXTENSIONS, LanguageOptions
+from app.core.constant import ALLOWED_IMAGE_EXTENSIONS, DocumentsType, LanguageOptions
 from app.models.document import Document
 from app.models.file_conversions import FileConversionModel
 from app.services.ocr.utils import build_libreoffice_command
@@ -79,6 +79,7 @@ def convert_to_pdf(document_id: str, db_session: Session) -> FileConversionModel
         converted_file_path=str(expected_pdf),
         converted_mime_type="application/pdf",
         converted_to_extension="pdf",
+        document_type=DocumentsType.CONVERTED_PDF.value,
     )
 
     db_session.add(converted_pdf_metadata)
@@ -283,6 +284,7 @@ def ensure_pdf_in_workspace(
             converted_file_path=str(dest_path),
             converted_mime_type="application/pdf",
             converted_to_extension="pdf",
+            document_type=DocumentsType.CONVERTED_PDF.value,
         )
         db_session.add(record)
         db_session.commit()
@@ -308,8 +310,8 @@ def return_list_images_path(document_id: str, db_session: Session) -> list[str]:
     file_ext = (
         "."
         + (
-            document.original_filename.rsplit(".", 1)[-1]
-            if "." in document.original_filename
+            document.stored_filename.rsplit(".", 1)[-1]
+            if "." in document.stored_filename
             else ""
         ).lower()
     )

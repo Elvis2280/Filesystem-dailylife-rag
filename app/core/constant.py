@@ -135,3 +135,11 @@ class LanguageOptions(str, Enum):
     ENGLISH = "EN"
     JAPANESE = "JP"
     MIXED = "MIXED"
+
+
+class DocumentsType(str, Enum):
+    ORIGINAL_FILE = "ORIGINAL"
+    CONVERTED_PDF = "CONVERT_PDF"
+    IMAGES_PAGES = "IMAGES_PAGES"
+    MD_ORIGINAL = "MD_ORIGINAL"
+    MD_TRANSLATED = "MD_TRANSLATED"

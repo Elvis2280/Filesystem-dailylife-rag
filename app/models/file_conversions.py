@@ -12,7 +12,7 @@ class FileConversionModel(Base):
     """SQLAlchemy model for file conversion records.
 
     Tracks format conversions such as document-to-PDF and PDF-to-image,
-    including the output path and target MIME type.
+    including the output path, target MIME type, and document type tag.
     """
 
     __tablename__ = "file_conversions"
@@ -26,6 +26,9 @@ class FileConversionModel(Base):
     converted_file_path: Mapped[str] = mapped_column(String, nullable=False)
     converted_mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
     converted_to_extension: Mapped[str] = mapped_column(String(20), nullable=False)
+    document_type: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )

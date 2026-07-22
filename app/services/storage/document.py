@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.constant import DocumentsType
 from app.core.redis_client import redis_client
 from app.models.document import Document
 from app.models.file_conversions import FileConversionModel
@@ -41,6 +42,7 @@ async def process_document_upload(
 ) -> tuple[Document, str]:
     document_id = uuid.uuid4()
     ext = (file.filename.rsplit(".", 1)[-1] or "").lower()
+    base_filename = file.filename[: -len(ext) - 1] if ext else file.filename
     is_pdf = file.content_type == "application/pdf"
     stored_filename = (
         f"{document_id}_original.{ext}" if ext else f"{document_id}_original"
@@ -74,7 +76,7 @@ async def process_document_upload(
     document = Document(
         id=document_id,
         workspace_id=uuid.UUID(workspace_id),
-        original_filename=file.filename,
+        original_filename=base_filename,
         stored_filename=stored_filename,
         mime_type=file.content_type or "application/octet-stream",
         page_count=page_count,
@@ -82,6 +84,17 @@ async def process_document_upload(
     db.add(document)
     await db.commit()
     await db.refresh(document)
+
+    if is_pdf:
+        original_record = FileConversionModel(
+            file_id=document_id,
+            converted_file_path=str(file_path),
+            converted_mime_type=file.content_type or "application/pdf",
+            converted_to_extension="pdf",
+            document_type=DocumentsType.ORIGINAL_FILE.value,
+        )
+        db.add(original_record)
+        await db.commit()
 
     task = dispatch_pipeline_task.delay(str(document_id))
     redis_client.setex(f"document_task:{document_id}", 1800, task.id)
@@ -140,6 +153,7 @@ async def convert_to_pdf(
         converted_file_path=str(expected_pdf),
         converted_mime_type="application/pdf",
         converted_to_extension="pdf",
+        document_type=DocumentsType.CONVERTED_PDF.value,
     )
 
     db_session.add(converted_pdf_metadata)

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pydantic import Field, model_validator
@@ -23,7 +24,17 @@ class Settings(BaseSettings):
 
     @property
     def CORS_ORIGINS(self) -> list[str]:
-        return ["*"] if self.IS_DEVELOPMENT else []
+        if not self.IS_DEVELOPMENT:
+            return []
+        env = os.getenv("CORS_ORIGINS")
+        if env:
+            return [o.strip() for o in env.split(",") if o.strip()]
+        return [
+            "http://localhost:1420",
+            "http://127.0.0.1:1420",
+            "http://localhost:3000",
+            "tauri://localhost",
+        ]
 
     @property
     def DOCS_URL(self) -> str | None:

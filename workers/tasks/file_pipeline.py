@@ -88,8 +88,8 @@ def process_file_upload(self, document_id: str) -> None:
             ext = (
                 "."
                 + (
-                    document.original_filename.rsplit(".", 1)[-1]
-                    if "." in document.original_filename
+                    document.stored_filename.rsplit(".", 1)[-1]
+                    if "." in document.stored_filename
                     else ""
                 )
             ).lower()
