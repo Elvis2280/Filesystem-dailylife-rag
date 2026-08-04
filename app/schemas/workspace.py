@@ -40,24 +40,18 @@ class FileNode(BaseModel):
     created_at: datetime | None = None
 
 
-class DocumentNode(BaseModel):
-    type: str = "document"
+class FolderNode(BaseModel):
+    type: str = "folder"
     id: str
     name: str
+    path: str | None = None
+    children: list[Union["FileNode", "FolderNode"]] = []
     original_name: str | None = None
     status: str | None = None
     language: str | None = None
     mime_type: str | None = None
     page_count: int | None = None
     created_at: datetime | None = None
-    children: list[FileNode] = []
-
-
-class FolderNode(BaseModel):
-    type: str = "folder"
-    name: str
-    path: str
-    children: list[Union["FileNode", "DocumentNode", "FolderNode"]] = []
 
 
 class WorkspaceTreeNode(BaseModel):

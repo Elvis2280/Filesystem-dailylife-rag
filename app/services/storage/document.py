@@ -20,6 +20,7 @@ from app.core.config import settings
 from app.core.constant import DocumentsType
 from app.core.redis_client import redis_client
 from app.models.document import Document
+from app.models.document_history import DocumentHistoryModel
 from app.models.file_conversions import FileConversionModel
 from app.services.ocr.utils import build_libreoffice_command
 from workers.tasks.file_pipeline import process_file_upload as dispatch_pipeline_task
@@ -84,6 +85,16 @@ async def process_document_upload(
     db.add(document)
     await db.commit()
     await db.refresh(document)
+
+    initial_history = DocumentHistoryModel(
+        document_id=document_id,
+        status="file_uploaded",
+        stage="pending",
+        step="0/8",
+        message="File uploaded, queued for processing",
+    )
+    db.add(initial_history)
+    await db.commit()
 
     if is_pdf:
         original_record = FileConversionModel(

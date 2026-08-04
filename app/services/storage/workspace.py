@@ -44,7 +44,7 @@ async def _build_workspace_children(
     documents = docs_result.scalars().all()
 
     if not documents:
-        return _empty_workspace_tree()
+        return _empty_workspace_tree(workspace_id)
 
     conversions = (
         (
@@ -65,15 +65,22 @@ async def _build_workspace_children(
     doc_name_map = {str(d.id): d.original_filename for d in documents}
 
     document_nodes = []
+    seen_counts: dict[str, int] = {}
     for doc in documents:
         doc_id_str = str(doc.id)
         doc_convs = by_doc.get(doc_id_str, [])
         children = _build_doc_children(doc_convs, doc.original_filename)
+        seen = seen_counts.get(doc.original_filename, 0)
+        name = (
+            f"{doc.original_filename}_({seen})" if seen > 0 else doc.original_filename
+        )
+        seen_counts[doc.original_filename] = seen + 1
         document_nodes.append(
             {
-                "type": "document",
+                "type": "folder",
                 "id": doc_id_str,
-                "name": doc.original_filename,
+                "name": name,
+                "path": None,
                 "original_name": doc.original_filename,
                 "status": doc.status,
                 "language": doc.language,
@@ -92,23 +99,27 @@ async def _build_workspace_children(
     return [
         {
             "type": "folder",
+            "id": f"{workspace_id}::files",
             "name": "Files",
             "path": "files",
             "children": document_nodes,
         },
         {
             "type": "folder",
+            "id": f"{workspace_id}::translation",
             "name": "Translation",
             "path": "translation",
             "children": [
                 {
                     "type": "folder",
+                    "id": f"{workspace_id}::translation/english",
                     "name": "English",
                     "path": "translation/english",
                     "children": en_nodes,
                 },
                 {
                     "type": "folder",
+                    "id": f"{workspace_id}::translation/japanese",
                     "name": "Japanese",
                     "path": "translation/japanese",
                     "children": ja_nodes,
@@ -118,22 +129,31 @@ async def _build_workspace_children(
     ]
 
 
-def _empty_workspace_tree() -> list[dict]:
+def _empty_workspace_tree(workspace_id: str) -> list[dict]:
     return [
-        {"type": "folder", "name": "Files", "path": "files", "children": []},
         {
             "type": "folder",
+            "id": f"{workspace_id}::files",
+            "name": "Files",
+            "path": "files",
+            "children": [],
+        },
+        {
+            "type": "folder",
+            "id": f"{workspace_id}::translation",
             "name": "Translation",
             "path": "translation",
             "children": [
                 {
                     "type": "folder",
+                    "id": f"{workspace_id}::translation/english",
                     "name": "English",
                     "path": "translation/english",
                     "children": [],
                 },
                 {
                     "type": "folder",
+                    "id": f"{workspace_id}::translation/japanese",
                     "name": "Japanese",
                     "path": "translation/japanese",
                     "children": [],
@@ -182,7 +202,7 @@ def _build_doc_children(
         ext = c.converted_to_extension or ""
         out.append(
             {
-                "type": "file",
+                "type": "document",
                 "id": str(c.id),
                 "name": f"{original_name}.{ext}" if ext else original_name,
                 "original_name": original_name,
@@ -245,12 +265,25 @@ def _build_lang_nodes(
     return nodes
 
 
+def _is_orphan_for_known_doc(filename: str, existing_ids: set[str]) -> bool:
+    m = re.search(
+        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+        filename,
+        re.IGNORECASE,
+    )
+    if m is None:
+        return False
+    return m.group(1) in existing_ids
+
+
 def _log_orphan_warnings(
     workspace_id: str,
     workspace_path: Path,
     documents: list[Document],
     conversions: list[FileConversionModel],
 ) -> None:
+    existing_doc_ids = {str(d.id) for d in documents}
+
     files_dir = workspace_path / "files"
     if files_dir.is_dir():
         tracked_types = {
@@ -258,16 +291,22 @@ def _log_orphan_warnings(
             DocumentsType.CONVERTED_PDF.value,
             DocumentsType.MD_ORIGINAL.value,
         }
+        tracked_exts = {"pdf", "txt", "md"}
         expected_filenames = {
             Path(c.converted_file_path).name
             for c in conversions
             if c.document_type in tracked_types
+            or c.converted_to_extension in tracked_exts
         }
         expected_filenames |= {
             doc.stored_filename for doc in documents if doc.stored_filename
         }
         on_disk = {f.name for f in files_dir.iterdir() if f.is_file()}
-        orphans = on_disk - expected_filenames
+        orphans = {
+            f
+            for f in (on_disk - expected_filenames)
+            if not _is_orphan_for_known_doc(f, existing_doc_ids)
+        }
         if orphans:
             logger.warning(
                 "Workspace %s has %d orphan files in files/: %s",
@@ -290,7 +329,11 @@ def _log_orphan_warnings(
             and lang_path_segment in c.converted_file_path
         }
         on_disk = {str(f) for f in trans_dir.iterdir() if f.is_file()}
-        orphans = on_disk - expected_paths
+        orphans = {
+            p
+            for p in (on_disk - expected_paths)
+            if not _is_orphan_for_known_doc(Path(p).name, existing_doc_ids)
+        }
         if orphans:
             logger.warning(
                 "Workspace %s has %d orphan files in translation/%s/: %s",

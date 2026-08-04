@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-# Fix ownership for bind-mounted and volume-mounted directories
+# Fix ownership for write directories (brain, storage) and source code bind mount
 chown -R appuser:appgroup /app/brain /app/storage 2>/dev/null || true
 
 # Create required directory structure (workspace subdirs created on demand)

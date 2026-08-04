@@ -12,6 +12,7 @@ from app.core.constant import (
 from app.core.database import get_sync_db
 from app.core.redis_client import redis_client
 from app.models.document import Document
+from app.models.document_history import DocumentHistoryModel
 from app.services.format.format import format_all_markdown
 from app.services.ocr.file_ocr_llm import extract_image_text
 from app.services.storage.document_sync import (
@@ -43,22 +44,35 @@ def _publish_status(
     page_number: int | None = None,
     total_pages: int | None = None,
     status: str = "PROGRESS",
+    db_session=None,
 ):
+    payload = {
+        "status": status,
+        "step": stage.step,
+        "stage": stage.value,
+        "message": message or stage.message,
+        "document_id": document_id,
+        "page_number": page_number,
+        "total_pages": total_pages,
+        "timestamp": datetime.now().isoformat(),
+    }
     redis_client.publish(
         f"document_updates:{document_id}",
-        json.dumps(
-            {
-                "status": status,
-                "step": stage.step,
-                "stage": stage.value,
-                "message": message or stage.message,
-                "document_id": document_id,
-                "page_number": page_number,
-                "total_pages": total_pages,
-                "timestamp": datetime.now().isoformat(),
-            }
-        ),
+        json.dumps(payload),
     )
+
+    if db_session is not None:
+        history = DocumentHistoryModel(
+            document_id=document_id,
+            status=status,
+            stage=stage.value,
+            step=stage.step,
+            message=message or stage.message,
+            page_number=page_number,
+            total_pages=total_pages,
+        )
+        db_session.add(history)
+        db_session.commit()
 
 
 def _set_status(
@@ -77,6 +91,7 @@ def _set_status(
     default_retry_delay=60,
 )
 def process_file_upload(self, document_id: str) -> None:
+    db_session = None
     try:
         with get_sync_db() as db_session:
             document = db_session.query(Document).filter_by(id=document_id).first()
@@ -101,6 +116,7 @@ def process_file_upload(self, document_id: str) -> None:
                 FilePipelineStage.PENDING,
                 message="File uploaded, starting processing...",
                 status=FileStatus.FILE_UPLOADED.value,
+                db_session=db_session,
             )
 
             if not is_pdf and ext not in ALLOWED_IMAGE_EXTENSIONS:
@@ -109,6 +125,7 @@ def process_file_upload(self, document_id: str) -> None:
                     document_id,
                     FilePipelineStage.PDF_CONVERSION,
                     status=FileStatus.FILE_CONVERSION_STARTED.value,
+                    db_session=db_session,
                 )
                 self.update_state(
                     state="PROGRESS",
@@ -136,6 +153,7 @@ def process_file_upload(self, document_id: str) -> None:
                     FilePipelineStage.PDF_CONVERSION,
                     message="File conversion finished.",
                     status=FileStatus.FILE_CONVERSION_FINISHED.value,
+                    db_session=db_session,
                 )
 
             if ext == ".pdf" or is_pdf:
@@ -143,6 +161,7 @@ def process_file_upload(self, document_id: str) -> None:
                     document_id,
                     FilePipelineStage.IMAGE_CONVERSION,
                     status=FileStatus.FILE_CONVERSION_FINISHED.value,
+                    db_session=db_session,
                 )
                 self.update_state(
                     state="PROGRESS",
@@ -183,6 +202,7 @@ def process_file_upload(self, document_id: str) -> None:
                     message=f"Starting OCR on {total_pages} pages...",
                     total_pages=total_pages,
                     status=FileStatus.OCR_STARTED.value,
+                    db_session=db_session,
                 )
                 self.update_state(
                     state="PROGRESS",
@@ -197,6 +217,7 @@ def process_file_upload(self, document_id: str) -> None:
                         page_number=idx + 1,
                         total_pages=total_pages,
                         status=FileStatus.OCR_STARTED.value,
+                        db_session=db_session,
                     )
                     try:
                         text = extract_image_text(image_path)
@@ -233,6 +254,7 @@ def process_file_upload(self, document_id: str) -> None:
                     message=f"OCR finished! {total_pages} pages processed.",
                     total_pages=total_pages,
                     status=FileStatus.OCR_FINISHED.value,
+                    db_session=db_session,
                 )
 
             _set_status(
@@ -243,6 +265,7 @@ def process_file_upload(self, document_id: str) -> None:
                 FilePipelineStage.TRANSLATION,
                 message="Starting translation and formatting...",
                 status=FileStatus.TRANSLATION_AND_FORMATTING_STARTED.value,
+                db_session=db_session,
             )
             self.update_state(
                 state="PROGRESS",
@@ -266,6 +289,7 @@ def process_file_upload(self, document_id: str) -> None:
                     FilePipelineStage.TRANSLATION,
                     message="Translation and formatting finished.",
                     status=FileStatus.TRANSLATION_AND_FORMATTING_FINISHED.value,
+                    db_session=db_session,
                 )
 
                 _set_status(document, FileStatus.COMPLETED, db_session)
@@ -275,6 +299,7 @@ def process_file_upload(self, document_id: str) -> None:
                     message=(f"Processing completed! {total_pages} pages processed."),
                     total_pages=total_pages,
                     status=FileStatus.COMPLETED.value,
+                    db_session=db_session,
                 )
 
                 return None
@@ -291,6 +316,7 @@ def process_file_upload(self, document_id: str) -> None:
                     FilePipelineStage.FAILED,
                     message=(f"Translation/formatting failed: {format_error}"),
                     status=FileStatus.FAILED.value,
+                    db_session=db_session,
                 )
                 raise
 
@@ -300,6 +326,7 @@ def process_file_upload(self, document_id: str) -> None:
             FilePipelineStage.FAILED,
             message=str(e),
             status=FileStatus.FAILED.value,
+            db_session=db_session,
         )
         self.update_state(
             state="FAILURE",
