@@ -58,10 +58,10 @@ class TestFormatAllMarkdown:
                 format_all_markdown("ws-1", "doc-1", db_session)
 
         assert mock_translate_content.call_count == 4
-        assert mock_format_markdown.call_count == 4
+        assert mock_format_markdown.call_count == 6
 
-        assert db_session.add.call_count == 4
-        assert db_session.commit.call_count == 4
+        assert db_session.add.call_count == 10
+        assert db_session.commit.call_count == 10
 
     @patch("app.services.format.format.translate_content")
     @patch("app.services.format.format.format_markdown")
@@ -142,8 +142,10 @@ class TestFormatAllMarkdown:
             RuntimeError("LLM failure"),
         ]
         mock_format_markdown.side_effect = [
+            "md_original_1",
             "md_en_1",
             "md_jp_1",
+            "md_original_2",
         ]
 
         with (
@@ -162,7 +164,7 @@ class TestFormatAllMarkdown:
 
                 format_all_markdown("ws-1", "doc-1", db_session)
 
-        # Page 1 succeeded: 2 adds (EN + JP)
-        # Page 2 failed: 0 adds
-        assert db_session.add.call_count == 2
-        assert mock_format_markdown.call_count == 2
+        # Page 1 succeeded: 3 adds (original + EN + JP)
+        # Page 2 failed on translations: 1 add (original only)
+        assert db_session.add.call_count == 6
+        assert mock_format_markdown.call_count == 4

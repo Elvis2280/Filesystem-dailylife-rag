@@ -178,35 +178,49 @@ class TestGetWorkspacesTreeJson:
             status=WorkspaceStatus.ACTIVE,
         )
 
-        # Mock documents for workspace 1
+        doc1_id = uuid.uuid4()
+        doc2_id = uuid.uuid4()
         doc1 = MagicMock()
-        doc1.id = uuid.uuid4()
+        doc1.id = doc1_id
         doc1.original_filename = "resume.pdf"
         doc1.language = "en"
         doc1.status = "ocr_completed"
+        doc1.mime_type = "application/pdf"
+        doc1.page_count = 5
+        doc1.created_at = None
 
         doc2 = MagicMock()
-        doc2.id = uuid.uuid4()
+        doc2.id = doc2_id
         doc2.original_filename = "invoice.pdf"
         doc2.language = "ja"
         doc2.status = "in_storage"
+        doc2.mime_type = "application/pdf"
+        doc2.page_count = 3
+        doc2.created_at = None
 
-        # No documents for workspace 2
         mock_workspace_result = MagicMock()
         mock_workspace_result.scalars.return_value.all.return_value = [w1, w2]
 
         mock_docs_result_1 = MagicMock()
         mock_docs_result_1.scalars.return_value.all.return_value = [doc1, doc2]
 
+        mock_convs_result_1 = MagicMock()
+        mock_convs_result_1.scalars.return_value.all.return_value = []
+
         mock_docs_result_2 = MagicMock()
         mock_docs_result_2.scalars.return_value.all.return_value = []
+
+        mock_convs_result_2 = MagicMock()
+        mock_convs_result_2.scalars.return_value.all.return_value = []
 
         db_session = AsyncMock()
         db_session.execute = AsyncMock(
             side_effect=[
                 mock_workspace_result,
                 mock_docs_result_1,
+                mock_convs_result_1,
                 mock_docs_result_2,
+                mock_convs_result_2,
             ]
         )
 
@@ -224,25 +238,46 @@ class TestGetWorkspacesTreeJson:
         assert files_folder["type"] == "folder"
         assert files_folder["name"] == "Files"
         assert files_folder["path"] == "files"
+        assert files_folder["id"] == f"{ws_id_1}::files"
         assert len(files_folder["children"]) == 2
-        assert files_folder["children"][0]["type"] == "file"
-        assert files_folder["children"][0]["name"] == "resume.pdf"
-        assert files_folder["children"][0]["language"] == "en"
-        assert files_folder["children"][0]["status"] == "ocr_completed"
-        assert files_folder["children"][1]["type"] == "file"
-        assert files_folder["children"][1]["name"] == "invoice.pdf"
-        assert files_folder["children"][1]["language"] == "ja"
-        assert files_folder["children"][1]["status"] == "in_storage"
+
+        doc_node_1 = files_folder["children"][0]
+        assert doc_node_1["type"] == "folder"
+        assert doc_node_1["id"] == str(doc1_id)
+        assert doc_node_1["name"] == "resume.pdf"
+        assert doc_node_1["path"] is None
+        assert doc_node_1["original_name"] == "resume.pdf"
+        assert doc_node_1["language"] == "en"
+        assert doc_node_1["status"] == "ocr_completed"
+        assert doc_node_1["mime_type"] == "application/pdf"
+        assert doc_node_1["page_count"] == 5
+        assert doc_node_1["children"] == []
+
+        doc_node_2 = files_folder["children"][1]
+        assert doc_node_2["type"] == "folder"
+        assert doc_node_2["id"] == str(doc2_id)
+        assert doc_node_2["name"] == "invoice.pdf"
+        assert doc_node_2["original_name"] == "invoice.pdf"
+        assert doc_node_2["language"] == "ja"
+        assert doc_node_2["status"] == "in_storage"
 
         translation_folder = ws1["children"][1]
         assert translation_folder["name"] == "Translation"
         assert translation_folder["path"] == "translation"
+        assert translation_folder["id"] == f"{ws_id_1}::translation"
         assert len(translation_folder["children"]) == 2
         assert translation_folder["children"][0]["name"] == "English"
         assert translation_folder["children"][0]["path"] == "translation/english"
+        assert (
+            translation_folder["children"][0]["id"] == f"{ws_id_1}::translation/english"
+        )
         assert translation_folder["children"][0]["children"] == []
         assert translation_folder["children"][1]["name"] == "Japanese"
         assert translation_folder["children"][1]["path"] == "translation/japanese"
+        assert (
+            translation_folder["children"][1]["id"]
+            == f"{ws_id_1}::translation/japanese"
+        )
         assert translation_folder["children"][1]["children"] == []
 
         ws2 = tree[1]
@@ -268,8 +303,13 @@ class TestGetWorkspacesTreeJson:
         mock_docs_result = MagicMock()
         mock_docs_result.scalars.return_value.all.return_value = []
 
+        mock_convs_result = MagicMock()
+        mock_convs_result.scalars.return_value.all.return_value = []
+
         db_session = AsyncMock()
-        db_session.execute = AsyncMock(side_effect=[mock_ws_result, mock_docs_result])
+        db_session.execute = AsyncMock(
+            side_effect=[mock_ws_result, mock_docs_result, mock_convs_result]
+        )
 
         tree = await get_workspaces_tree_json(db_session)
 
@@ -286,22 +326,142 @@ class TestGetWorkspacesTreeJson:
             storage_key="key-active",
             status=WorkspaceStatus.ACTIVE,
         )
-        # Only active workspace is returned by the mock
         mock_workspace_result = MagicMock()
         mock_workspace_result.scalars.return_value.all.return_value = [w_active]
 
         mock_docs_result = MagicMock()
         mock_docs_result.scalars.return_value.all.return_value = []
 
+        mock_convs_result = MagicMock()
+        mock_convs_result.scalars.return_value.all.return_value = []
+
         db_session = AsyncMock()
         db_session.execute = AsyncMock(
-            side_effect=[mock_workspace_result, mock_docs_result]
+            side_effect=[mock_workspace_result, mock_docs_result, mock_convs_result]
         )
 
         tree = await get_workspaces_tree_json(db_session)
 
         assert len(tree) == 1
         assert tree[0]["name"] == "Active"
+
+    @pytest.mark.asyncio
+    async def test_disambiguates_duplicate_filenames(self):
+        ws_id = uuid.uuid4()
+        workspace = WorkspaceModel(
+            id=ws_id,
+            name="Test",
+            slug="test",
+            storage_key="key",
+            status=WorkspaceStatus.ACTIVE,
+        )
+
+        doc1 = MagicMock()
+        doc1.id = uuid.uuid4()
+        doc1.original_filename = "report.pdf"
+        doc1.language = None
+        doc1.status = "completed"
+        doc1.mime_type = "application/pdf"
+        doc1.page_count = 10
+        doc1.created_at = None
+
+        doc2 = MagicMock()
+        doc2.id = uuid.uuid4()
+        doc2.original_filename = "report.pdf"
+        doc2.language = None
+        doc2.status = "completed"
+        doc2.mime_type = "application/pdf"
+        doc2.page_count = 5
+        doc2.created_at = None
+
+        mock_ws_result = MagicMock()
+        mock_ws_result.scalars.return_value.all.return_value = [workspace]
+        mock_docs_result = MagicMock()
+        mock_docs_result.scalars.return_value.all.return_value = [doc1, doc2]
+        mock_convs_result = MagicMock()
+        mock_convs_result.scalars.return_value.all.return_value = []
+
+        db_session = AsyncMock()
+        db_session.execute = AsyncMock(
+            side_effect=[mock_ws_result, mock_docs_result, mock_convs_result]
+        )
+
+        tree = await get_workspaces_tree_json(db_session)
+
+        files_children = tree[0]["children"][0]["children"]
+        assert len(files_children) == 2
+        assert files_children[0]["name"] == "report.pdf"
+        assert files_children[1]["name"] == "report.pdf_(1)"
+
+    @pytest.mark.asyncio
+    async def test_folder_ids_are_workspace_scoped(self):
+        ws_id = uuid.uuid4()
+        workspace = WorkspaceModel(
+            id=ws_id,
+            name="Test",
+            slug="test",
+            storage_key="key",
+            status=WorkspaceStatus.ACTIVE,
+        )
+
+        mock_ws_result = MagicMock()
+        mock_ws_result.scalars.return_value.all.return_value = [workspace]
+        mock_docs_result = MagicMock()
+        mock_docs_result.scalars.return_value.all.return_value = []
+        mock_convs_result = MagicMock()
+        mock_convs_result.scalars.return_value.all.return_value = []
+
+        db_session = AsyncMock()
+        db_session.execute = AsyncMock(
+            side_effect=[mock_ws_result, mock_docs_result, mock_convs_result]
+        )
+
+        tree = await get_workspaces_tree_json(db_session)
+
+        ws_children = tree[0]["children"]
+        assert ws_children[0]["id"] == f"{ws_id}::files"
+        assert ws_children[1]["id"] == f"{ws_id}::translation"
+        assert ws_children[1]["children"][0]["id"] == f"{ws_id}::translation/english"
+        assert ws_children[1]["children"][1]["id"] == f"{ws_id}::translation/japanese"
+
+    @pytest.mark.asyncio
+    async def test_doc_node_uses_document_uuid_as_id(self):
+        ws_id = uuid.uuid4()
+        workspace = WorkspaceModel(
+            id=ws_id,
+            name="Test",
+            slug="test",
+            storage_key="key",
+            status=WorkspaceStatus.ACTIVE,
+        )
+
+        doc_id = uuid.uuid4()
+        doc = MagicMock()
+        doc.id = doc_id
+        doc.original_filename = "file.pdf"
+        doc.language = None
+        doc.status = "completed"
+        doc.mime_type = "application/pdf"
+        doc.page_count = 1
+        doc.created_at = None
+
+        mock_ws_result = MagicMock()
+        mock_ws_result.scalars.return_value.all.return_value = [workspace]
+        mock_docs_result = MagicMock()
+        mock_docs_result.scalars.return_value.all.return_value = [doc]
+        mock_convs_result = MagicMock()
+        mock_convs_result.scalars.return_value.all.return_value = []
+
+        db_session = AsyncMock()
+        db_session.execute = AsyncMock(
+            side_effect=[mock_ws_result, mock_docs_result, mock_convs_result]
+        )
+
+        tree = await get_workspaces_tree_json(db_session)
+
+        doc_node = tree[0]["children"][0]["children"][0]
+        assert doc_node["id"] == str(doc_id)
+        assert doc_node["type"] == "folder"
 
 
 @pytest.mark.unit

@@ -5,30 +5,41 @@ and relays messages to the WebSocket client until the task completes
 or fails.
 """
 
-import asyncio
 import json
 import logging
+from uuid import UUID
 
 from app.core.constant import FileStatus
+from app.core.database import async_session
 from app.core.redis_client import get_async_redis_client
 from app.core.websocket_manager import manager
 
 logger = logging.getLogger("memory_rag.ws.document_status")
 
 
-def _send_current_state_sync(document_id: str) -> dict | None:
-    """Read the document's current state from the DB (sync, runs in a thread)."""
-    from app.core.database import get_sync_db
+async def _get_current_state(document_id: str) -> dict | None:
+    """Read the document's latest state from the DB (async).
+
+    Returns the most recent ``document_history`` row ordered by
+    ``created_at DESC``, or a fallback dict built from the ``documents``
+    table if no history exists yet, or ``None`` if the document itself
+    is not found.
+    """
+    from sqlalchemy import select
+
     from app.models.document import Document
     from app.models.document_history import DocumentHistoryModel
 
-    with get_sync_db() as db:
-        history = (
-            db.query(DocumentHistoryModel)
-            .filter(DocumentHistoryModel.document_id == document_id)
+    doc_uuid = UUID(document_id)
+    async with async_session() as db:
+        history_result = await db.execute(
+            select(DocumentHistoryModel)
+            .where(DocumentHistoryModel.document_id == doc_uuid)
             .order_by(DocumentHistoryModel.created_at.desc())
-            .first()
+            .limit(1)
         )
+        history = history_result.scalar_one_or_none()
+
         if history is not None:
             return {
                 "type": "current_state",
@@ -43,10 +54,14 @@ def _send_current_state_sync(document_id: str) -> dict | None:
                     history.created_at.isoformat() if history.created_at else None
                 ),
             }
+
         # No history yet — fall back to document's current status
-        doc = db.query(Document).filter_by(id=document_id).first()
+        doc_result = await db.execute(select(Document).where(Document.id == doc_uuid))
+        doc = doc_result.scalar_one_or_none()
+
         if doc is None:
             return None
+
         return {
             "type": "current_state",
             "status": doc.status or "",
@@ -61,8 +76,8 @@ def _send_current_state_sync(document_id: str) -> dict | None:
 
 
 async def _send_current_state(document_id: str) -> dict | None:
-    """Run the sync DB query in a thread and send the result to the WebSocket."""
-    state = await asyncio.to_thread(_send_current_state_sync, document_id)
+    """Fetch the latest state from the DB and send it to the WebSocket."""
+    state = await _get_current_state(document_id)
     if state is not None:
         await manager.send_message(document_id, state)
     return state
@@ -73,8 +88,8 @@ async def stream_document_status(document_id: str) -> None:
     current_state = None
     try:
         current_state = await _send_current_state(document_id)
-    except Exception as e:
-        logger.warning("Failed to send current state for %s: %s", document_id, e)
+    except Exception:
+        logger.exception("Failed to send current state for %s", document_id)
 
     # If the document is already in a terminal state, close immediately
     if current_state is not None and current_state.get("status") in (

@@ -56,10 +56,17 @@ def _publish_status(
         "total_pages": total_pages,
         "timestamp": datetime.now().isoformat(),
     }
-    redis_client.publish(
-        f"document_updates:{document_id}",
-        json.dumps(payload),
-    )
+    try:
+        redis_client.publish(
+            f"document_updates:{document_id}",
+            json.dumps(payload),
+        )
+    except Exception as e:
+        logging.getLogger("memory_rag.pipeline").warning(
+            "Failed to publish status to Redis for document %s: %s",
+            document_id,
+            e,
+        )
 
     if db_session is not None:
         history = DocumentHistoryModel(
