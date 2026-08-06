@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.constant import DocumentsType
+from app.core.constant import DocumentsType, FilePipelineStage
 from app.core.redis_client import redis_client
 from app.models.document import Document
 from app.models.document_history import DocumentHistoryModel
@@ -90,7 +90,7 @@ async def process_document_upload(
         document_id=document_id,
         status="file_uploaded",
         stage="pending",
-        step="0/8",
+        step=FilePipelineStage.PENDING.step,
         message="File uploaded, queued for processing",
     )
     db.add(initial_history)

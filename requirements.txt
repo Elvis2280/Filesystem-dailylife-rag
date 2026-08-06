@@ -32,6 +32,7 @@ alembic>=1.13.0
 # ML / Embeddings
 torch>=2.8.0
 sentence-transformers>=3.4.0
+langchain-text-splitters>=0.3.0
 
 # Language Detection
 lingua-language-detector>=2.0.0

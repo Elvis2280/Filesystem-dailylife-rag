@@ -18,6 +18,7 @@ class FileStatus(str, Enum):
     OCR_FINISHED = "ocr_finished"
     TRANSLATION_AND_FORMATTING_STARTED = "translation_and_formatting_started"
     TRANSLATION_AND_FORMATTING_FINISHED = "translation_and_formatting_finished"
+    FILE_PROCESS_FINISHED = "file_process_finished"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -33,23 +34,31 @@ class FilePipelineStage(str, Enum):
     LANGUAGE_DETECTION = "language_detection"
     TRANSLATION = "translation"
     CREATING_MARKDOWN_FILES = "creating_markdown_files"
-    SAVING_FILES = "saving_files"
+    FILE_PROCESS_FINISHED = "file_process_finished"
+    VERIFY_FILES = "verify_files"
+    COLLECTING_DATA = "collecting_data"
+    PREPARING_DATA = "preparing_data"
+    SAVING_DATA = "saving_data"
     COMPLETED = "completed"
     FAILED = "failed"
 
     @property
     def step(self) -> str:
         _steps = {
-            "pending": "0/8",
-            "pdf_conversion": "1/8",
-            "image_conversion": "2/8",
-            "ocr_processing": "3/8",
-            "language_detection": "4/8",
-            "translation": "5/8",
-            "creating_markdown_files": "6/8",
-            "saving_files": "7/8",
-            "completed": "8/8",
-            "failed": "0/8",
+            "pending": "0/12",
+            "pdf_conversion": "1/12",
+            "image_conversion": "2/12",
+            "ocr_processing": "3/12",
+            "language_detection": "4/12",
+            "translation": "5/12",
+            "creating_markdown_files": "6/12",
+            "file_process_finished": "7/12",
+            "verify_files": "8/12",
+            "collecting_data": "9/12",
+            "preparing_data": "10/12",
+            "saving_data": "11/12",
+            "completed": "12/12",
+            "failed": "0/12",
         }
         return _steps[self.value]
 
@@ -63,7 +72,11 @@ class FilePipelineStage(str, Enum):
             "language_detection": "Detecting language...",
             "translation": "Translating content...",
             "creating_markdown_files": "Creating Markdown files...",
-            "saving_files": "Saving files...",
+            "file_process_finished": "File processing finished. Starting vector indexing...",
+            "verify_files": "Verifying required files...",
+            "collecting_data": "Collecting data on page...",
+            "preparing_data": "Preparing data on page...",
+            "saving_data": "Saving data to vector store...",
             "completed": "Processing completed successfully!",
             "failed": "Processing failed.",
         }

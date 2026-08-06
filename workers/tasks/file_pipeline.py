@@ -91,6 +91,13 @@ def _set_status(
     db_session.commit()
 
 
+def _dispatch_save_data_task(document_id: str) -> None:
+    """Queue vector-store indexing after the file pipeline succeeds."""
+    from workers.tasks.save_data import process_save_data
+
+    process_save_data.delay(document_id)
+
+
 @celery_app.task(
     name="workers.tasks.process_file_upload",
     bind=True,
@@ -226,14 +233,51 @@ def process_file_upload(self, document_id: str) -> None:
                         status=FileStatus.OCR_STARTED.value,
                         db_session=db_session,
                     )
-                    try:
-                        text = extract_image_text(image_path)
-                    except Exception as e:
+                    text: str | None = None
+                    for attempt in (1, 2):
+                        try:
+                            text = extract_image_text(image_path)
+                        except Exception as e:
+                            logging.getLogger("memory_rag.pipeline").warning(
+                                "OCR failed for page %d (attempt %d/2) of document %s: %s",
+                                idx + 1,
+                                attempt,
+                                document_id,
+                                e,
+                            )
+                            text = None
+                            break
+
+                        if text and text.strip():
+                            break
+
+                        text = None
+                        if attempt == 1:
+                            logging.getLogger("memory_rag.pipeline").info(
+                                "OCR returned empty text for page %d of document %s, "
+                                "retrying once",
+                                idx + 1,
+                                document_id,
+                            )
+                            _publish_status(
+                                document_id,
+                                FilePipelineStage.OCR_PROCESSING,
+                                message=(
+                                    f"Retrying OCR for page {idx + 1} of "
+                                    f"{total_pages}..."
+                                ),
+                                page_number=idx + 1,
+                                total_pages=total_pages,
+                                status=FileStatus.OCR_STARTED.value,
+                                db_session=db_session,
+                            )
+
+                    if not text:
                         logging.getLogger("memory_rag.pipeline").warning(
-                            "OCR failed for page %d of document %s: %s",
+                            "OCR produced no text for page %d of document %s "
+                            "after 2 attempts",
                             idx + 1,
                             document_id,
-                            e,
                         )
                         continue
 
@@ -299,15 +343,24 @@ def process_file_upload(self, document_id: str) -> None:
                     db_session=db_session,
                 )
 
-                _set_status(document, FileStatus.COMPLETED, db_session)
+                _set_status(document, FileStatus.FILE_PROCESS_FINISHED, db_session)
                 _publish_status(
                     document_id,
-                    FilePipelineStage.COMPLETED,
-                    message=(f"Processing completed! {total_pages} pages processed."),
+                    FilePipelineStage.FILE_PROCESS_FINISHED,
+                    message=(
+                        f"File processing finished for {total_pages} pages. "
+                        f"Indexing next..."
+                    ),
                     total_pages=total_pages,
-                    status=FileStatus.COMPLETED.value,
+                    status=FileStatus.FILE_PROCESS_FINISHED.value,
                     db_session=db_session,
                 )
+                self.update_state(
+                    state="PROGRESS",
+                    meta={"stage": "file_process_finished"},
+                )
+
+                _dispatch_save_data_task(str(document_id))
 
                 return None
             except Exception as format_error:

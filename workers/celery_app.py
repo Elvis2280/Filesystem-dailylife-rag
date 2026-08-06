@@ -17,3 +17,4 @@ celery_app.conf.update(
 )
 
 import workers.tasks.file_pipeline  # noqa: E402,F401 — Register task modules for Celery autodiscovery
+import workers.tasks.save_data  # noqa: E402,F401 — Register task modules for Celery autodiscovery

@@ -57,7 +57,7 @@ class TestProcessDocumentUpload:
             history_row = history_adds[0][0][0]
             assert history_row.status == "file_uploaded"
             assert history_row.stage == "pending"
-            assert history_row.step == "0/8"
+            assert history_row.step == "0/12"
             assert history_row.message == "File uploaded, queued for processing"
 
     @patch("app.services.storage.document.redis_client")
@@ -98,7 +98,7 @@ class TestProcessDocumentUpload:
             h = history_adds[0][0][0]
             assert h.status == "file_uploaded"
             assert h.stage == "pending"
-            assert h.step == "0/8"
+            assert h.step == "0/12"
 
     @patch("app.services.storage.document.redis_client")
     @patch("app.services.storage.document.dispatch_pipeline_task")

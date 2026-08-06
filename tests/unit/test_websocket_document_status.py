@@ -194,12 +194,12 @@ class TestStreamDocumentStatus:
     async def test_ws_connection_after_multiple_steps_sends_latest_step(
         self, mock_get_state, mock_get_redis
     ):
-        """After 3 steps are recorded (0/8, 1/8, 2/8), WS connects and receives
-        the latest step (2/8), not the first (0/8)."""
+        """After 3 steps are recorded (0/12, 1/12, 2/12), WS connects and receives
+        the latest step (2/12), not the first (0/12)."""
         latest_state = {
             "type": "current_state",
             "status": "file_conversion_finished",
-            "step": "2/8",
+            "step": "2/12",
             "stage": "image_conversion",
             "message": "Image conversion finished",
             "document_id": "doc-1",
@@ -241,7 +241,7 @@ class TestGetCurrentState:
         mock_history = MagicMock()
         mock_history.status = "ocr_started"
         mock_history.stage = "ocr_processing"
-        mock_history.step = "3/8"
+        mock_history.step = "3/12"
         mock_history.message = "Running OCR..."
         mock_history.page_number = 2
         mock_history.total_pages = 5
@@ -266,7 +266,7 @@ class TestGetCurrentState:
         assert result["type"] == "current_state"
         assert result["status"] == "ocr_started"
         assert result["stage"] == "ocr_processing"
-        assert result["step"] == "3/8"
+        assert result["step"] == "3/12"
         assert result["message"] == "Running OCR..."
         assert result["page_number"] == 2
         assert result["total_pages"] == 5

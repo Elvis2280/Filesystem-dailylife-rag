@@ -13,7 +13,7 @@ class WebSocketProgressMessage(BaseModel):
     status: str = Field(
         ..., description="FileStatus value: file_uploaded, file_conversion_started, ..."
     )
-    step: str = Field(..., description="Current step: 0/4, 1/4, 2/4, 3/4, 4/4")
+    step: str = Field(..., description="Current step: 0/12, 1/12, ..., 12/12")
     stage: str = Field(..., description="Stage name matching FilePipelineStage value")
     message: str = Field(..., description="Human-readable status message")
     file_id: str = Field(..., description="File UUID")

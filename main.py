@@ -104,6 +104,17 @@ async def lifespan(app: FastAPI):
                 "Ollama model '%s' for Translation is NOT available",
                 settings.OLLAMA_MODEL_TRANSLATION,
             )
+        # Cleaner model Check
+        if settings.OLLAMA_MODEL_CLEANER in health_resp.available_models:
+            logger.info(
+                "Ollama model '%s' for Cleaner is available",
+                settings.OLLAMA_MODEL_CLEANER,
+            )
+        else:
+            logger.warning(
+                "Ollama model '%s' for Cleaner is NOT available",
+                settings.OLLAMA_MODEL_CLEANER,
+            )
     else:
         logger.warning(
             "Ollama: NOT reachable at %s:%d. OCR and LLM features will be unavailable.",

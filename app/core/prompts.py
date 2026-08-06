@@ -93,3 +93,11 @@ TRANSLATE_TO_JAPANESE_PROMPT = (
     "Translate the following text faithfully, preserving all meaning, tone, and formatting. "
     "Output ONLY the translated text, with no additional commentary.\n\n{text}"
 )
+
+CLEANING_PROMPT = """You are an OCR text cleaning assistant.
+Task:
+1. Remove isolated list of raw numbers, spatial measurements, and floating labels (e.g., standalone "14.5", "R7", "30") that lack sentence context or table structure.
+2. Preserve all legitimate descriptive text, headings, tables, and full sentences.
+3. If the input contains ONLY useless floating numbers, output: [NO_SEARCHABLE_CONTENT]
+
+Return ONLY the cleaned text. Do not add commentary or explanations."""

@@ -14,6 +14,12 @@ def _mock_task():
     return task
 
 
+@pytest.fixture(autouse=True)
+def _no_real_save_data_dispatch():
+    with patch("workers.tasks.file_pipeline._dispatch_save_data_task") as mock_dispatch:
+        yield mock_dispatch
+
+
 @pytest.mark.unit
 class TestFilePipeline:
     @patch("workers.tasks.file_pipeline.redis_client")
@@ -131,7 +137,7 @@ class TestFilePipeline:
 
         result = task.run(document_id)
 
-        assert mock_doc.status == FileStatus.COMPLETED.value
+        assert mock_doc.status == FileStatus.FILE_PROCESS_FINISHED.value
         mock_ensure_pdf_in_workspace.assert_called_once_with(document_id, mock_session)
         assert result is None
         assert mock_save_ocr_page.call_count == 3
@@ -196,7 +202,7 @@ class TestFilePipeline:
 
         result = task.run(document_id)
 
-        assert mock_doc.status == FileStatus.COMPLETED.value
+        assert mock_doc.status == FileStatus.FILE_PROCESS_FINISHED.value
         mock_ensure_pdf_in_workspace.assert_not_called()
         mock_convert_to_images.assert_not_called()
         assert result is None
@@ -367,14 +373,14 @@ class TestFilePipelineHistory:
 
         assert rows[0].status == FileStatus.FILE_UPLOADED.value
         assert rows[0].stage == FilePipelineStage.PENDING.value
-        assert rows[0].step == "0/8"
+        assert rows[0].step == "0/12"
 
         assert rows[1].stage == FilePipelineStage.IMAGE_CONVERSION.value
-        assert rows[1].step == "2/8"
+        assert rows[1].step == "2/12"
 
         assert rows[2].status == FileStatus.OCR_STARTED.value
         assert rows[2].stage == FilePipelineStage.OCR_PROCESSING.value
-        assert rows[2].step == "3/8"
+        assert rows[2].step == "3/12"
         assert rows[2].page_number is None
 
         for i in range(3):
@@ -387,14 +393,14 @@ class TestFilePipelineHistory:
 
         assert rows[7].status == FileStatus.TRANSLATION_AND_FORMATTING_STARTED.value
         assert rows[7].stage == FilePipelineStage.TRANSLATION.value
-        assert rows[7].step == "5/8"
+        assert rows[7].step == "5/12"
 
         assert rows[8].status == FileStatus.TRANSLATION_AND_FORMATTING_FINISHED.value
         assert rows[8].stage == FilePipelineStage.TRANSLATION.value
 
-        assert rows[9].status == FileStatus.COMPLETED.value
-        assert rows[9].stage == FilePipelineStage.COMPLETED.value
-        assert rows[9].step == "8/8"
+        assert rows[9].status == FileStatus.FILE_PROCESS_FINISHED.value
+        assert rows[9].stage == FilePipelineStage.FILE_PROCESS_FINISHED.value
+        assert rows[9].step == "7/12"
 
     @patch("workers.tasks.file_pipeline.redis_client")
     @patch("workers.tasks.file_pipeline.format_all_markdown")
@@ -486,7 +492,7 @@ class TestFilePipelineHistory:
         failed_rows = [r for r in rows if r.status == FileStatus.FAILED.value]
         assert len(failed_rows) >= 1
         assert failed_rows[0].stage == FilePipelineStage.FAILED.value
-        assert failed_rows[0].step == "0/8"
+        assert failed_rows[0].step == "0/12"
 
     @patch("workers.tasks.file_pipeline.redis_client")
     @patch("workers.tasks.file_pipeline.format_all_markdown")
@@ -693,7 +699,7 @@ class TestFilePipelineHistory:
         failed_rows = [r for r in rows if r.status == FileStatus.FAILED.value]
         assert len(failed_rows) >= 1
         assert failed_rows[-1].stage == FilePipelineStage.FAILED.value
-        assert failed_rows[-1].step == "0/8"
+        assert failed_rows[-1].step == "0/12"
 
         mock_extract_image_text.assert_not_called()
         mock_format_all_markdown.assert_not_called()
@@ -748,5 +754,373 @@ class TestFilePipelineHistory:
 
         rows = _extract_history_rows(mock_session)
         assert len(rows) >= 1
-        assert rows[-1].status == FileStatus.COMPLETED.value
-        assert rows[-1].stage == FilePipelineStage.COMPLETED.value
+        assert rows[-1].status == FileStatus.FILE_PROCESS_FINISHED.value
+        assert rows[-1].stage == FilePipelineStage.FILE_PROCESS_FINISHED.value
+
+
+@pytest.mark.unit
+class TestFilePipelineOcrRetry:
+    @patch("workers.tasks.file_pipeline.redis_client")
+    @patch("workers.tasks.file_pipeline.format_all_markdown")
+    @patch("workers.tasks.file_pipeline.save_ocr_page")
+    @patch("workers.tasks.file_pipeline.extract_image_text")
+    @patch("workers.tasks.file_pipeline.return_list_images_path")
+    @patch("workers.tasks.file_pipeline.ensure_pdf_in_workspace")
+    @patch("workers.tasks.file_pipeline.convert_to_images")
+    @patch("workers.tasks.file_pipeline.get_sync_db")
+    def test_ocr_empty_first_attempt_retries_and_succeeds(
+        self,
+        mock_get_sync_db,
+        mock_convert_to_images,
+        mock_ensure_pdf_in_workspace,
+        mock_return_list_images_path,
+        mock_extract_image_text,
+        mock_save_ocr_page,
+        mock_format_all_markdown,
+        mock_redis,
+    ):
+        document_id = "11111111-1111-1111-1111-111111111111"
+
+        mock_doc = MagicMock()
+        mock_doc.id = document_id
+        mock_doc.workspace_id = "22222222-2222-2222-2222-222222222222"
+        mock_doc.original_filename = "test.pdf"
+        mock_doc.stored_filename = "test.pdf"
+        mock_doc.mime_type = "application/pdf"
+        mock_doc.page_count = 2
+
+        mock_query = MagicMock()
+        mock_query.filter_by.return_value.first.return_value = mock_doc
+
+        mock_session = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_session.__enter__.return_value = mock_session
+
+        mock_get_sync_db.return_value = mock_session
+        mock_convert_to_images.return_value = [MagicMock(converted_to_extension="png")]
+        mock_return_list_images_path.return_value = ["p1.png", "p2.png"]
+        mock_extract_image_text.side_effect = ["", "real text", "text2"]
+
+        task = _mock_task()
+        task.run(document_id)
+
+        assert mock_extract_image_text.call_count == 3
+        assert mock_save_ocr_page.call_count == 2
+        mock_save_ocr_page.assert_any_call(
+            document_id,
+            "22222222-2222-2222-2222-222222222222",
+            page_number=1,
+            text="real text",
+            db_session=mock_session,
+        )
+        mock_save_ocr_page.assert_any_call(
+            document_id,
+            "22222222-2222-2222-2222-222222222222",
+            page_number=2,
+            text="text2",
+            db_session=mock_session,
+        )
+
+    @patch("workers.tasks.file_pipeline.redis_client")
+    @patch("workers.tasks.file_pipeline.format_all_markdown")
+    @patch("workers.tasks.file_pipeline.save_ocr_page")
+    @patch("workers.tasks.file_pipeline.extract_image_text")
+    @patch("workers.tasks.file_pipeline.return_list_images_path")
+    @patch("workers.tasks.file_pipeline.ensure_pdf_in_workspace")
+    @patch("workers.tasks.file_pipeline.convert_to_images")
+    @patch("workers.tasks.file_pipeline.get_sync_db")
+    def test_ocr_empty_both_attempts_skips_save(
+        self,
+        mock_get_sync_db,
+        mock_convert_to_images,
+        mock_ensure_pdf_in_workspace,
+        mock_return_list_images_path,
+        mock_extract_image_text,
+        mock_save_ocr_page,
+        mock_format_all_markdown,
+        mock_redis,
+    ):
+        document_id = "11111111-1111-1111-1111-111111111111"
+
+        mock_doc = MagicMock()
+        mock_doc.id = document_id
+        mock_doc.workspace_id = "22222222-2222-2222-2222-222222222222"
+        mock_doc.original_filename = "test.pdf"
+        mock_doc.stored_filename = "test.pdf"
+        mock_doc.mime_type = "application/pdf"
+        mock_doc.page_count = 1
+
+        mock_query = MagicMock()
+        mock_query.filter_by.return_value.first.return_value = mock_doc
+
+        mock_session = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_session.__enter__.return_value = mock_session
+
+        mock_get_sync_db.return_value = mock_session
+        mock_convert_to_images.return_value = [MagicMock(converted_to_extension="png")]
+        mock_return_list_images_path.return_value = ["p1.png"]
+        mock_extract_image_text.side_effect = ["", ""]
+
+        task = _mock_task()
+        task.run(document_id)
+
+        assert mock_extract_image_text.call_count == 2
+        mock_save_ocr_page.assert_not_called()
+
+    @patch("workers.tasks.file_pipeline.redis_client")
+    @patch("workers.tasks.file_pipeline.format_all_markdown")
+    @patch("workers.tasks.file_pipeline.save_ocr_page")
+    @patch("workers.tasks.file_pipeline.extract_image_text")
+    @patch("workers.tasks.file_pipeline.return_list_images_path")
+    @patch("workers.tasks.file_pipeline.ensure_pdf_in_workspace")
+    @patch("workers.tasks.file_pipeline.convert_to_images")
+    @patch("workers.tasks.file_pipeline.get_sync_db")
+    def test_ocr_whitespace_only_is_treated_as_empty(
+        self,
+        mock_get_sync_db,
+        mock_convert_to_images,
+        mock_ensure_pdf_in_workspace,
+        mock_return_list_images_path,
+        mock_extract_image_text,
+        mock_save_ocr_page,
+        mock_format_all_markdown,
+        mock_redis,
+    ):
+        document_id = "11111111-1111-1111-1111-111111111111"
+
+        mock_doc = MagicMock()
+        mock_doc.id = document_id
+        mock_doc.workspace_id = "22222222-2222-2222-2222-222222222222"
+        mock_doc.original_filename = "test.pdf"
+        mock_doc.stored_filename = "test.pdf"
+        mock_doc.mime_type = "application/pdf"
+        mock_doc.page_count = 1
+
+        mock_query = MagicMock()
+        mock_query.filter_by.return_value.first.return_value = mock_doc
+
+        mock_session = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_session.__enter__.return_value = mock_session
+
+        mock_get_sync_db.return_value = mock_session
+        mock_convert_to_images.return_value = [MagicMock(converted_to_extension="png")]
+        mock_return_list_images_path.return_value = ["p1.png"]
+        mock_extract_image_text.side_effect = ["   \n  ", "final"]
+
+        task = _mock_task()
+        task.run(document_id)
+
+        assert mock_extract_image_text.call_count == 2
+        mock_save_ocr_page.assert_called_once_with(
+            document_id,
+            "22222222-2222-2222-2222-222222222222",
+            page_number=1,
+            text="final",
+            db_session=mock_session,
+        )
+
+    @patch("workers.tasks.file_pipeline.redis_client")
+    @patch("workers.tasks.file_pipeline.format_all_markdown")
+    @patch("workers.tasks.file_pipeline.save_ocr_page")
+    @patch("workers.tasks.file_pipeline.extract_image_text")
+    @patch("workers.tasks.file_pipeline.return_list_images_path")
+    @patch("workers.tasks.file_pipeline.ensure_pdf_in_workspace")
+    @patch("workers.tasks.file_pipeline.convert_to_images")
+    @patch("workers.tasks.file_pipeline.get_sync_db")
+    def test_ocr_exception_is_not_retried(
+        self,
+        mock_get_sync_db,
+        mock_convert_to_images,
+        mock_ensure_pdf_in_workspace,
+        mock_return_list_images_path,
+        mock_extract_image_text,
+        mock_save_ocr_page,
+        mock_format_all_markdown,
+        mock_redis,
+    ):
+        document_id = "11111111-1111-1111-1111-111111111111"
+
+        mock_doc = MagicMock()
+        mock_doc.id = document_id
+        mock_doc.workspace_id = "22222222-2222-2222-2222-222222222222"
+        mock_doc.original_filename = "test.pdf"
+        mock_doc.stored_filename = "test.pdf"
+        mock_doc.mime_type = "application/pdf"
+        mock_doc.page_count = 1
+
+        mock_query = MagicMock()
+        mock_query.filter_by.return_value.first.return_value = mock_doc
+
+        mock_session = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_session.__enter__.return_value = mock_session
+
+        mock_get_sync_db.return_value = mock_session
+        mock_convert_to_images.return_value = [MagicMock(converted_to_extension="png")]
+        mock_return_list_images_path.return_value = ["p1.png"]
+        mock_extract_image_text.side_effect = RuntimeError("Ollama timed out")
+
+        task = _mock_task()
+        task.run(document_id)
+
+        assert mock_extract_image_text.call_count == 1
+        mock_save_ocr_page.assert_not_called()
+
+    @patch("workers.tasks.file_pipeline.redis_client")
+    @patch("workers.tasks.file_pipeline.format_all_markdown")
+    @patch("workers.tasks.file_pipeline.save_ocr_page")
+    @patch("workers.tasks.file_pipeline.extract_image_text")
+    @patch("workers.tasks.file_pipeline.return_list_images_path")
+    @patch("workers.tasks.file_pipeline.ensure_pdf_in_workspace")
+    @patch("workers.tasks.file_pipeline.convert_to_images")
+    @patch("workers.tasks.file_pipeline.get_sync_db")
+    def test_ocr_empty_then_exception_moves_to_next_page(
+        self,
+        mock_get_sync_db,
+        mock_convert_to_images,
+        mock_ensure_pdf_in_workspace,
+        mock_return_list_images_path,
+        mock_extract_image_text,
+        mock_save_ocr_page,
+        mock_format_all_markdown,
+        mock_redis,
+    ):
+        document_id = "11111111-1111-1111-1111-111111111111"
+
+        mock_doc = MagicMock()
+        mock_doc.id = document_id
+        mock_doc.workspace_id = "22222222-2222-2222-2222-222222222222"
+        mock_doc.original_filename = "test.pdf"
+        mock_doc.stored_filename = "test.pdf"
+        mock_doc.mime_type = "application/pdf"
+        mock_doc.page_count = 2
+
+        mock_query = MagicMock()
+        mock_query.filter_by.return_value.first.return_value = mock_doc
+
+        mock_session = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_session.__enter__.return_value = mock_session
+
+        mock_get_sync_db.return_value = mock_session
+        mock_convert_to_images.return_value = [MagicMock(converted_to_extension="png")]
+        mock_return_list_images_path.return_value = ["p1.png", "p2.png"]
+        mock_extract_image_text.side_effect = [
+            "",
+            RuntimeError("Ollama timed out"),
+            "ok",
+        ]
+
+        task = _mock_task()
+        task.run(document_id)
+
+        assert mock_extract_image_text.call_count == 3
+        mock_save_ocr_page.assert_called_once_with(
+            document_id,
+            "22222222-2222-2222-2222-222222222222",
+            page_number=2,
+            text="ok",
+            db_session=mock_session,
+        )
+
+
+@pytest.mark.unit
+class TestFilePipelineDispatch:
+    @patch("workers.tasks.file_pipeline.redis_client")
+    @patch("workers.tasks.file_pipeline.format_all_markdown")
+    @patch("workers.tasks.file_pipeline.save_ocr_page")
+    @patch("workers.tasks.file_pipeline.extract_image_text")
+    @patch("workers.tasks.file_pipeline.return_list_images_path")
+    @patch("workers.tasks.file_pipeline.ensure_pdf_in_workspace")
+    @patch("workers.tasks.file_pipeline.convert_to_images")
+    @patch("workers.tasks.file_pipeline.get_sync_db")
+    def test_success_dispatches_save_data(
+        self,
+        mock_get_sync_db,
+        mock_convert_to_images,
+        mock_ensure_pdf_in_workspace,
+        mock_return_list_images_path,
+        mock_extract_image_text,
+        mock_save_ocr_page,
+        mock_format_all_markdown,
+        mock_redis,
+        _no_real_save_data_dispatch,
+    ):
+        document_id = "11111111-1111-1111-1111-111111111111"
+
+        mock_doc = MagicMock()
+        mock_doc.id = document_id
+        mock_doc.workspace_id = "22222222-2222-2222-2222-222222222222"
+        mock_doc.original_filename = "test.pdf"
+        mock_doc.stored_filename = "test.pdf"
+        mock_doc.mime_type = "application/pdf"
+        mock_doc.page_count = 1
+
+        mock_query = MagicMock()
+        mock_query.filter_by.return_value.first.return_value = mock_doc
+
+        mock_session = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_session.__enter__.return_value = mock_session
+
+        mock_get_sync_db.return_value = mock_session
+        mock_convert_to_images.return_value = [MagicMock(converted_to_extension="png")]
+        mock_return_list_images_path.return_value = ["p1.png"]
+        mock_extract_image_text.return_value = "text"
+
+        task = _mock_task()
+        task.run(document_id)
+
+        assert mock_doc.status == FileStatus.FILE_PROCESS_FINISHED.value
+        _no_real_save_data_dispatch.assert_called_once_with(document_id)
+
+    @patch("workers.tasks.file_pipeline.redis_client")
+    @patch("workers.tasks.file_pipeline.format_all_markdown")
+    @patch("workers.tasks.file_pipeline.save_ocr_page")
+    @patch("workers.tasks.file_pipeline.extract_image_text")
+    @patch("workers.tasks.file_pipeline.return_list_images_path")
+    @patch("workers.tasks.file_pipeline.ensure_pdf_in_workspace")
+    @patch("workers.tasks.file_pipeline.convert_to_images")
+    @patch("workers.tasks.file_pipeline.get_sync_db")
+    def test_format_failure_does_not_dispatch_save_data(
+        self,
+        mock_get_sync_db,
+        mock_convert_to_images,
+        mock_ensure_pdf_in_workspace,
+        mock_return_list_images_path,
+        mock_extract_image_text,
+        mock_save_ocr_page,
+        mock_format_all_markdown,
+        mock_redis,
+        _no_real_save_data_dispatch,
+    ):
+        document_id = "11111111-1111-1111-1111-111111111111"
+
+        mock_doc = MagicMock()
+        mock_doc.id = document_id
+        mock_doc.workspace_id = "22222222-2222-2222-2222-222222222222"
+        mock_doc.original_filename = "test.pdf"
+        mock_doc.stored_filename = "test.pdf"
+        mock_doc.mime_type = "application/pdf"
+        mock_doc.page_count = 1
+
+        mock_query = MagicMock()
+        mock_query.filter_by.return_value.first.return_value = mock_doc
+
+        mock_session = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_session.__enter__.return_value = mock_session
+
+        mock_get_sync_db.return_value = mock_session
+        mock_convert_to_images.return_value = [MagicMock(converted_to_extension="png")]
+        mock_return_list_images_path.return_value = ["p1.png"]
+        mock_extract_image_text.return_value = "text"
+        mock_format_all_markdown.side_effect = RuntimeError("Format LLM failed")
+
+        task = _mock_task()
+        with pytest.raises(RuntimeError, match="Format LLM failed"):
+            task.run(document_id)
+
+        _no_real_save_data_dispatch.assert_not_called()
