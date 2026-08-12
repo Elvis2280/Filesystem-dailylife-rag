@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     OLLAMA_MODEL_FORMAT: str = "qwen3:14b"
     OLLAMA_MODEL_TRANSLATION: str = "qwen3:14b"
     OLLAMA_MODEL_CLEANER: str = "qwen2.5:1.5b"
+    OLLAMA_MODEL_EMBEDDING: str = "bge-m3"
     OLLAMA_TIMEOUT: int = 600
 
     # Brain Storage

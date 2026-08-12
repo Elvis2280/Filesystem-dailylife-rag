@@ -29,6 +29,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.routes.chat import router as chat_router
 from app.api.routes.document import router as document_router
 from app.api.routes.workspace import router as workspace_router
 from app.core.config import settings
@@ -115,6 +116,17 @@ async def lifespan(app: FastAPI):
                 "Ollama model '%s' for Cleaner is NOT available",
                 settings.OLLAMA_MODEL_CLEANER,
             )
+        # Embedding model Check
+        if settings.OLLAMA_MODEL_EMBEDDING in health_resp.available_models:
+            logger.info(
+                "Ollama model '%s' for Embedding is available",
+                settings.OLLAMA_MODEL_EMBEDDING,
+            )
+        else:
+            logger.warning(
+                "Ollama model '%s' for Embedding is NOT available",
+                settings.OLLAMA_MODEL_EMBEDDING,
+            )
     else:
         logger.warning(
             "Ollama: NOT reachable at %s:%d. OCR and LLM features will be unavailable.",
@@ -158,6 +170,7 @@ if settings.IS_DEVELOPMENT:
     app.include_router(ollama_router)
 
 # Register API route modules
+app.include_router(chat_router)
 app.include_router(workspace_router)
 app.include_router(document_router)
 

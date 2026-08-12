@@ -82,3 +82,33 @@ class OllamaSyncClient:
             return str(response.message.content)
         except Exception as e:
             raise RuntimeError(f"Ollama generation failed: {e}")
+
+    def embed(
+        self,
+        model: str,
+        input: str | list[str],
+    ) -> list[list[float]]:
+        """Send a text embedding request to Ollama.
+
+        Uses the official /api/embed endpoint, which accepts a single
+        string or a batch of strings. Returns the embedding vectors as
+        plain Python lists of floats.
+
+        Args:
+            model: Ollama embedding model name (e.g. "bge-m3").
+            input: Text or list of texts to embed.
+
+        Returns:
+            List of embedding vectors, one per input text.
+
+        Raises:
+            RuntimeError: If the model is unavailable or returns an error.
+        """
+        try:
+            response = self._client.embed(
+                model=model,
+                input=input,
+            )
+            return [list(vector) for vector in response.embeddings]
+        except Exception as e:
+            raise RuntimeError(f"Ollama embedding failed: {e}")

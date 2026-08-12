@@ -13,6 +13,8 @@ from app.core.redis_client import redis_client
 from app.models.document import Document
 from app.models.document_history import DocumentHistoryModel
 from app.services.format.cleaner_llm import clean_text
+from app.services.rag.embedding import embedding
+from app.services.rag.qdrant_client import upsert_embeddings
 from workers.celery_app import celery_app
 
 logger = logging.getLogger("memory_rag.save_data")
@@ -108,15 +110,6 @@ def _chunk_english(text: str) -> list[str]:
         chunk_overlap=200,
     )
     return splitter.split_text(text)
-
-
-def pending(chunks: list[str]) -> list:
-    """Placeholder for bge-m3 embedding. Returns the chunks unchanged.
-
-    To be replaced with a real bge-m3 embedder that maps each chunk to a
-    dense vector.
-    """
-    return chunks
 
 
 @celery_app.task(
@@ -215,7 +208,15 @@ def process_save_data(self, document_id: str) -> None:
                 )
 
                 chunk_data = _chunk_english(english_markdown)
-                embedding_data = pending(chunk_data)
+                if not chunk_data:
+                    logger.info(
+                        "save_data: page %d for document %s has no English "
+                        "chunks; skipping",
+                        page,
+                        document_id,
+                    )
+                    continue
+                embedding_data = embedding(chunk_data)
 
                 logger.info(
                     "save_data: page %d produced %d English chunks",
@@ -223,13 +224,21 @@ def process_save_data(self, document_id: str) -> None:
                     len(chunk_data),
                 )
                 logger.info(
-                    "save_data: page %d embedded %d vectors (pending)",
+                    "save_data: page %d embedded %d vectors",
                     page,
                     len(embedding_data),
                 )
 
-                # TODO step 2: index embedding_data (raw, English, Japanese)
-                # into the Qdrant vector store.
+                upsert_embeddings(
+                    document_id=document_id,
+                    workspace_id=workspace_id,
+                    page_number=page,
+                    language="en",
+                    texts=chunk_data,
+                    vectors=embedding_data,
+                    raw_ocr=raw_text,
+                    japanese_text=japanese_markdown,
+                )
 
             _publish_status(
                 document_id,

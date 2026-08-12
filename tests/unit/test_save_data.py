@@ -12,6 +12,12 @@ DOCUMENT_ID = "11111111-1111-1111-1111-111111111111"
 WORKSPACE_ID = "22222222-2222-2222-2222-222222222222"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_qdrant_upsert():
+    with patch("workers.tasks.save_data.upsert_embeddings") as mock_upsert:
+        yield mock_upsert
+
+
 def _mock_task():
     from workers.tasks.save_data import process_save_data
 
@@ -451,12 +457,12 @@ class TestSaveData:
     @patch("workers.tasks.save_data.redis_client")
     @patch("workers.tasks.save_data.get_sync_db")
     @patch("workers.tasks.save_data.clean_text")
-    @patch("workers.tasks.save_data.pending")
+    @patch("workers.tasks.save_data.embedding")
     @patch("workers.tasks.save_data._chunk_english")
     def test_english_markdown_is_chunked_with_cleaned_value(
         self,
         mock_chunk_english,
-        mock_pending,
+        mock_embedding,
         mock_clean_text,
         mock_get_sync_db,
         mock_redis,
@@ -468,23 +474,23 @@ class TestSaveData:
         _write_page(tmp_path, 1, raw="raw 1", en="en 1", ja="ja 1")
         mock_clean_text.side_effect = ["raw", "CLEANED EN", "ja"]
         mock_chunk_english.return_value = ["c1", "c2"]
-        mock_pending.side_effect = lambda chunks: chunks
+        mock_embedding.side_effect = lambda chunks: chunks
 
         task = _mock_task()
         task.run(DOCUMENT_ID)
 
         mock_chunk_english.assert_called_once_with("CLEANED EN")
-        mock_pending.assert_called_once_with(["c1", "c2"])
+        mock_embedding.assert_called_once_with(["c1", "c2"])
 
     @patch("workers.tasks.save_data.redis_client")
     @patch("workers.tasks.save_data.get_sync_db")
     @patch("workers.tasks.save_data.clean_text")
-    @patch("workers.tasks.save_data.pending")
+    @patch("workers.tasks.save_data.embedding")
     @patch("workers.tasks.save_data._chunk_english")
-    def test_pending_result_assigned_to_embedding_data_and_logged(
+    def test_embedding_result_assigned_to_embedding_data_and_logged(
         self,
         mock_chunk_english,
-        mock_pending,
+        mock_embedding,
         mock_clean_text,
         mock_get_sync_db,
         mock_redis,
@@ -497,25 +503,25 @@ class TestSaveData:
         _write_page(tmp_path, 1, raw="raw 1", en="en 1", ja="ja 1")
         mock_clean_text.side_effect = lambda x: x
         mock_chunk_english.return_value = ["c1", "c2"]
-        mock_pending.return_value = ["e1", "e2"]
+        mock_embedding.return_value = ["e1", "e2"]
 
         task = _mock_task()
         with caplog.at_level(logging.INFO, logger="memory_rag.save_data"):
             task.run(DOCUMENT_ID)
 
-        mock_pending.assert_called_once_with(["c1", "c2"])
+        mock_embedding.assert_called_once_with(["c1", "c2"])
         assert "produced 2 English chunks" in caplog.text
-        assert "embedded 2 vectors (pending)" in caplog.text
+        assert "embedded 2 vectors" in caplog.text
 
     @patch("workers.tasks.save_data.redis_client")
     @patch("workers.tasks.save_data.get_sync_db")
     @patch("workers.tasks.save_data.clean_text")
-    @patch("workers.tasks.save_data.pending")
+    @patch("workers.tasks.save_data.embedding")
     @patch("workers.tasks.save_data._chunk_english")
     def test_log_emits_chunked_and_embedded_lines_per_page(
         self,
         mock_chunk_english,
-        mock_pending,
+        mock_embedding,
         mock_clean_text,
         mock_get_sync_db,
         mock_redis,
@@ -529,7 +535,7 @@ class TestSaveData:
         _write_page(tmp_path, 2, raw="raw 2", en="en 2", ja="ja 2")
         mock_clean_text.side_effect = lambda x: x
         mock_chunk_english.return_value = ["c1"]
-        mock_pending.side_effect = lambda chunks: chunks
+        mock_embedding.side_effect = lambda chunks: chunks
 
         task = _mock_task()
         with caplog.at_level(logging.INFO, logger="memory_rag.save_data"):
@@ -537,18 +543,18 @@ class TestSaveData:
 
         assert "page 1 produced 1 English chunks" in caplog.text
         assert "page 2 produced 1 English chunks" in caplog.text
-        assert "page 1 embedded 1 vectors (pending)" in caplog.text
-        assert "page 2 embedded 1 vectors (pending)" in caplog.text
+        assert "page 1 embedded 1 vectors" in caplog.text
+        assert "page 2 embedded 1 vectors" in caplog.text
 
     @patch("workers.tasks.save_data.redis_client")
     @patch("workers.tasks.save_data.get_sync_db")
     @patch("workers.tasks.save_data.clean_text")
-    @patch("workers.tasks.save_data.pending")
+    @patch("workers.tasks.save_data.embedding")
     @patch("workers.tasks.save_data._chunk_english")
     def test_page_skipped_when_all_empty_does_not_chunk_or_embed(
         self,
         mock_chunk_english,
-        mock_pending,
+        mock_embedding,
         mock_clean_text,
         mock_get_sync_db,
         mock_redis,
@@ -560,10 +566,54 @@ class TestSaveData:
         _write_page(tmp_path, 1, raw="raw 1", en="en 1", ja="ja 1")
         mock_clean_text.return_value = ""
         mock_chunk_english.side_effect = AssertionError("should not chunk")
-        mock_pending.side_effect = AssertionError("should not embed")
+        mock_embedding.side_effect = AssertionError("should not embed")
 
         task = _mock_task()
         task.run(DOCUMENT_ID)
 
         mock_chunk_english.assert_not_called()
-        mock_pending.assert_not_called()
+        mock_embedding.assert_not_called()
+
+    @patch("workers.tasks.save_data.redis_client")
+    @patch("workers.tasks.save_data.get_sync_db")
+    @patch("workers.tasks.save_data.clean_text")
+    @patch("workers.tasks.save_data.embedding")
+    @patch("workers.tasks.save_data._chunk_english")
+    def test_upsert_called_per_page_with_payload(
+        self,
+        mock_chunk_english,
+        mock_embedding,
+        mock_clean_text,
+        mock_get_sync_db,
+        mock_redis,
+        tmp_path,
+        monkeypatch,
+        _no_real_qdrant_upsert,
+    ):
+        monkeypatch.setattr(settings, "BRAIN_WORKSPACES_PATH", str(tmp_path))
+        mock_get_sync_db.return_value = _mock_session(_make_document(2))
+        _write_page(tmp_path, 1, raw="raw 1", en="en 1", ja="ja 1")
+        _write_page(tmp_path, 2, raw="raw 2", en="en 2", ja="ja 2")
+        mock_clean_text.side_effect = lambda x: x
+        mock_chunk_english.return_value = ["c1", "c2"]
+        mock_embedding.return_value = [[0.1, 0.2], [0.3, 0.4]]
+
+        task = _mock_task()
+        task.run(DOCUMENT_ID)
+
+        assert _no_real_qdrant_upsert.call_count == 2
+
+        first = _no_real_qdrant_upsert.call_args_list[0].kwargs
+        assert first["document_id"] == DOCUMENT_ID
+        assert first["workspace_id"] == WORKSPACE_ID
+        assert first["page_number"] == 1
+        assert first["language"] == "en"
+        assert first["texts"] == ["c1", "c2"]
+        assert first["vectors"] == [[0.1, 0.2], [0.3, 0.4]]
+        assert first["raw_ocr"] == "raw 1"
+        assert first["japanese_text"] == "ja 1"
+
+        second = _no_real_qdrant_upsert.call_args_list[1].kwargs
+        assert second["page_number"] == 2
+        assert second["raw_ocr"] == "raw 2"
+        assert second["japanese_text"] == "ja 2"
