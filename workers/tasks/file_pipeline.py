@@ -106,6 +106,7 @@ def _dispatch_save_data_task(document_id: str) -> None:
 )
 def process_file_upload(self, document_id: str) -> None:
     db_session = None
+    document = None
     try:
         with get_sync_db() as db_session:
             document = db_session.query(Document).filter_by(id=document_id).first()
@@ -273,13 +274,10 @@ def process_file_upload(self, document_id: str) -> None:
                             )
 
                     if not text:
-                        logging.getLogger("memory_rag.pipeline").warning(
-                            "OCR produced no text for page %d of document %s "
-                            "after 2 attempts",
-                            idx + 1,
-                            document_id,
+                        raise RuntimeError(
+                            f"OCR failed for page {idx + 1} of document "
+                            f"{document_id} after 2 attempts"
                         )
-                        continue
 
                     try:
                         save_ocr_page(
@@ -290,13 +288,10 @@ def process_file_upload(self, document_id: str) -> None:
                             db_session=db_session,
                         )
                     except Exception as e:
-                        logging.getLogger("memory_rag.pipeline").warning(
-                            "Failed to save OCR page %d for document %s: %s",
-                            idx + 1,
-                            document_id,
-                            e,
-                        )
-                        continue
+                        raise RuntimeError(
+                            f"Failed to save OCR page {idx + 1} for document "
+                            f"{document_id}: {e}"
+                        ) from e
 
                 _set_status(document, FileStatus.OCR_FINISHED, db_session)
                 _publish_status(
@@ -381,15 +376,14 @@ def process_file_upload(self, document_id: str) -> None:
                 raise
 
     except Exception as e:
+        if document is not None and db_session is not None:
+            document.status = FileStatus.FAILED.value
+            db_session.commit()
         _publish_status(
             document_id,
             FilePipelineStage.FAILED,
             message=str(e),
             status=FileStatus.FAILED.value,
             db_session=db_session,
-        )
-        self.update_state(
-            state="FAILURE",
-            meta={"stage": "failed", "error": str(e)},
         )
         raise

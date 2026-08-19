@@ -67,7 +67,13 @@ class OllamaClient:
                 )
 
     async def generate_async(
-        self, model: str, prompt: str, image_base64: str | None = None
+        self,
+        model: str,
+        prompt: str,
+        image_base64: str | None = None,
+        num_ctx: int = 16384,
+        num_predict: int = 2048,
+        temperature: float = 0,
     ) -> str:
         """Send an async chat request to Ollama with model, prompt, and optional image.
 
@@ -99,10 +105,11 @@ class OllamaClient:
                         "model": model,
                         "stream": False,
                         "messages": [message],
+                        "think": False,
                         "options": {
-                            "num_ctx": 20480,
-                            "num_predict": 2048,
-                            "temperature": 0,
+                            "num_ctx": num_ctx,
+                            "num_predict": num_predict,
+                            "temperature": temperature,
                         },
                     },
                 )

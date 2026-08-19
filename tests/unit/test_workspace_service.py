@@ -6,6 +6,7 @@ from app.services.storage.workspace import (
     create_workspace,
     disable_workspace,
     get_workspaces_tree_json,
+    list_workspaces,
     WorkspaceAlreadyDisabledError,
 )
 from app.core.constant import WorkspaceStatus
@@ -561,3 +562,36 @@ class TestDisableWorkspace:
             await disable_workspace(str(ws_id), db_session)
 
         db_session.rollback.assert_awaited_once()
+
+
+@pytest.mark.unit
+class TestListWorkspaces:
+    @pytest.mark.asyncio
+    async def test_returns_all_workspaces(self):
+        ws1 = WorkspaceModel(name="Project A", slug="project-a", storage_key="key-a")
+        ws1.id = uuid.uuid4()
+        ws2 = WorkspaceModel(name="Project B", slug="project-b", storage_key="key-b")
+        ws2.id = uuid.uuid4()
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [ws1, ws2]
+
+        db_session = AsyncMock()
+        db_session.execute = AsyncMock(return_value=mock_result)
+
+        workspaces = await list_workspaces(db_session)
+
+        assert workspaces == [ws1, ws2]
+        db_session.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_when_no_workspaces(self):
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+
+        db_session = AsyncMock()
+        db_session.execute = AsyncMock(return_value=mock_result)
+
+        workspaces = await list_workspaces(db_session)
+
+        assert workspaces == []

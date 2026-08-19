@@ -189,3 +189,66 @@ class TestQdrantClient:
                     raw_ocr="raw",
                     japanese_text="ja",
                 )
+
+    def test_search_embeddings_filters_by_workspace_with_limit(self):
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        from app.services.rag.qdrant_client import search_embeddings
+
+        mock_client = MagicMock()
+        mock_client.query_points.return_value.points = []
+
+        with patch(
+            "app.services.rag.qdrant_client.get_qdrant_client",
+            return_value=mock_client,
+        ):
+            search_embeddings([0.1, 0.2], "ws-1")
+
+        call_kwargs = mock_client.query_points.call_args.kwargs
+        assert call_kwargs["query"] == [0.1, 0.2]
+        assert call_kwargs["limit"] == 3
+        query_filter = call_kwargs["query_filter"]
+        assert isinstance(query_filter, Filter)
+        assert query_filter.must == [
+            FieldCondition(key="workspace_id", match=MatchValue(value="ws-1"))
+        ]
+
+    def test_search_embeddings_returns_raw_points(self):
+        from app.services.rag.qdrant_client import search_embeddings
+
+        mock_point = MagicMock()
+        mock_point.id = "p1"
+        mock_point.score = 0.91
+        mock_point.payload = {"text": "chunk one"}
+
+        mock_client = MagicMock()
+        mock_client.query_points.return_value.points = [mock_point]
+
+        with patch(
+            "app.services.rag.qdrant_client.get_qdrant_client",
+            return_value=mock_client,
+        ):
+            results = search_embeddings([0.1, 0.2], "ws-1")
+
+        assert results == [
+            {"id": "p1", "score": 0.91, "payload": {"text": "chunk one"}}
+        ]
+
+    def test_search_embeddings_rejects_empty_vector(self):
+        from app.services.rag.qdrant_client import search_embeddings
+
+        with pytest.raises(ValueError, match="No vector"):
+            search_embeddings([], "ws-1")
+
+    def test_search_embeddings_raises_runtime_error_on_failure(self):
+        from app.services.rag.qdrant_client import search_embeddings
+
+        mock_client = MagicMock()
+        mock_client.query_points.side_effect = RuntimeError("Qdrant is down")
+
+        with patch(
+            "app.services.rag.qdrant_client.get_qdrant_client",
+            return_value=mock_client,
+        ):
+            with pytest.raises(RuntimeError, match="Qdrant is down"):
+                search_embeddings([0.1], "ws-1")

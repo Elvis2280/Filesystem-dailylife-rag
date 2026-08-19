@@ -44,7 +44,13 @@ class OllamaSyncClient:
         )
 
     def generate(
-        self, model: str, prompt: str, image: str | bytes | None = None
+        self,
+        model: str,
+        prompt: str,
+        image: str | bytes | None = None,
+        num_ctx: int = 8192,
+        num_predict: int = 4096,
+        temperature: float = 0.0,
     ) -> str:
         """Send a chat request to Ollama with model, prompt, and optional image.
 
@@ -72,13 +78,20 @@ class OllamaSyncClient:
             response = self._client.chat(
                 model=model,
                 messages=[message],
+                stream=False,
+                think=False,
                 options={
-                    "num_ctx": 32768,
-                    "num_predict": 8192,
-                    "temperature": 0,
-                    "stop": ["```"],
+                    "num_ctx": num_ctx,
+                    "num_predict": num_predict,
+                    "temperature": temperature,
                 },
             )
+            print("========== OLLAMA RESPONSE ==========")
+            print(response)
+            print("MESSAGE:", response.message)
+            print("CONTENT:", repr(response.message.content))
+            print("======================================")
+
             return str(response.message.content)
         except Exception as e:
             raise RuntimeError(f"Ollama generation failed: {e}")

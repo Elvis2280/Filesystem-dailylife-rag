@@ -266,8 +266,4 @@ def process_save_data(self, document_id: str) -> None:
             status=FileStatus.FAILED.value,
             db_session=db_session,
         )
-        self.update_state(
-            state="FAILURE",
-            meta={"stage": "failed", "error": str(e)},
-        )
         raise

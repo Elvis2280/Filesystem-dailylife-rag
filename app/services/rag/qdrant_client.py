@@ -2,7 +2,14 @@ import logging
 from uuid import NAMESPACE_URL, uuid5
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 from app.core.config import settings
 
@@ -111,3 +118,56 @@ def upsert_embeddings(
     except Exception as e:
         logger.error("Failed to upsert points into '%s': %s", collection_name, e)
         raise RuntimeError(f"Qdrant upsert failed: {e}") from e
+
+
+def search_embeddings(
+    vector: list[float],
+    workspace_id: str,
+    limit: int = 3,
+    collection_name: str = COLLECTION_NAME,
+) -> list[dict]:
+    """Search the closest stored vectors for a given workspace.
+
+    Args:
+        vector: Query embedding vector.
+        workspace_id: Only points belonging to this workspace are returned.
+        limit: Maximum number of results to return (top-k).
+
+    Returns:
+        A list of raw result dicts with "id", "score", and "payload".
+
+    Raises:
+        ValueError: If no query vector is provided.
+        RuntimeError: If the search fails.
+    """
+    if not vector:
+        logger.error("Search called without a query vector")
+        raise ValueError("No vector provided for search")
+
+    client = get_qdrant_client()
+    try:
+        response = client.query_points(
+            collection_name=collection_name,
+            query=vector,
+            query_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="workspace_id",
+                        match=MatchValue(value=workspace_id),
+                    )
+                ]
+            ),
+            limit=limit,
+        )
+    except Exception as e:
+        logger.error("Failed to search collection '%s': %s", collection_name, e)
+        raise RuntimeError(f"Qdrant search failed: {e}") from e
+
+    return [
+        {
+            "id": str(point.id),
+            "score": point.score,
+            "payload": point.payload or {},
+        }
+        for point in response.points
+    ]

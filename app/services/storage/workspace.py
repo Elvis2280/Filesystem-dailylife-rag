@@ -367,6 +367,14 @@ async def get_workspaces_tree_json(
     return tree
 
 
+async def list_workspaces(db_session: AsyncSession) -> list[WorkspaceModel]:
+    """Return all workspaces with their metadata."""
+    result = await db_session.execute(
+        select(WorkspaceModel).order_by(WorkspaceModel.name, WorkspaceModel.created_at)
+    )
+    return list(result.scalars().all())
+
+
 async def disable_workspace(workspace_id: str, db_session: AsyncSession) -> str:
     result = await db_session.execute(
         select(WorkspaceModel).where(WorkspaceModel.id == workspace_id)

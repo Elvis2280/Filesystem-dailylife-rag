@@ -829,7 +829,7 @@ class TestFilePipelineOcrRetry:
     @patch("workers.tasks.file_pipeline.ensure_pdf_in_workspace")
     @patch("workers.tasks.file_pipeline.convert_to_images")
     @patch("workers.tasks.file_pipeline.get_sync_db")
-    def test_ocr_empty_both_attempts_skips_save(
+    def test_ocr_empty_both_attempts_fails_pipeline(
         self,
         mock_get_sync_db,
         mock_convert_to_images,
@@ -863,10 +863,14 @@ class TestFilePipelineOcrRetry:
         mock_extract_image_text.side_effect = ["", ""]
 
         task = _mock_task()
-        task.run(document_id)
+
+        with pytest.raises(RuntimeError, match="after 2 attempts"):
+            task.run(document_id)
 
         assert mock_extract_image_text.call_count == 2
         mock_save_ocr_page.assert_not_called()
+        mock_format_all_markdown.assert_not_called()
+        assert mock_doc.status == FileStatus.FAILED.value
 
     @patch("workers.tasks.file_pipeline.redis_client")
     @patch("workers.tasks.file_pipeline.format_all_markdown")
@@ -929,7 +933,7 @@ class TestFilePipelineOcrRetry:
     @patch("workers.tasks.file_pipeline.ensure_pdf_in_workspace")
     @patch("workers.tasks.file_pipeline.convert_to_images")
     @patch("workers.tasks.file_pipeline.get_sync_db")
-    def test_ocr_exception_is_not_retried(
+    def test_ocr_exception_fails_pipeline(
         self,
         mock_get_sync_db,
         mock_convert_to_images,
@@ -963,10 +967,13 @@ class TestFilePipelineOcrRetry:
         mock_extract_image_text.side_effect = RuntimeError("Ollama timed out")
 
         task = _mock_task()
-        task.run(document_id)
+
+        with pytest.raises(RuntimeError):
+            task.run(document_id)
 
         assert mock_extract_image_text.call_count == 1
         mock_save_ocr_page.assert_not_called()
+        assert mock_doc.status == FileStatus.FAILED.value
 
     @patch("workers.tasks.file_pipeline.redis_client")
     @patch("workers.tasks.file_pipeline.format_all_markdown")
@@ -976,7 +983,7 @@ class TestFilePipelineOcrRetry:
     @patch("workers.tasks.file_pipeline.ensure_pdf_in_workspace")
     @patch("workers.tasks.file_pipeline.convert_to_images")
     @patch("workers.tasks.file_pipeline.get_sync_db")
-    def test_ocr_empty_then_exception_moves_to_next_page(
+    def test_ocr_empty_then_exception_fails_pipeline(
         self,
         mock_get_sync_db,
         mock_convert_to_images,
@@ -1014,16 +1021,64 @@ class TestFilePipelineOcrRetry:
         ]
 
         task = _mock_task()
-        task.run(document_id)
 
-        assert mock_extract_image_text.call_count == 3
-        mock_save_ocr_page.assert_called_once_with(
-            document_id,
-            "22222222-2222-2222-2222-222222222222",
-            page_number=2,
-            text="ok",
-            db_session=mock_session,
-        )
+        with pytest.raises(RuntimeError):
+            task.run(document_id)
+
+        assert mock_extract_image_text.call_count == 2
+        mock_save_ocr_page.assert_not_called()
+        mock_format_all_markdown.assert_not_called()
+        assert mock_doc.status == FileStatus.FAILED.value
+
+    @patch("workers.tasks.file_pipeline.redis_client")
+    @patch("workers.tasks.file_pipeline.format_all_markdown")
+    @patch("workers.tasks.file_pipeline.save_ocr_page")
+    @patch("workers.tasks.file_pipeline.extract_image_text")
+    @patch("workers.tasks.file_pipeline.return_list_images_path")
+    @patch("workers.tasks.file_pipeline.ensure_pdf_in_workspace")
+    @patch("workers.tasks.file_pipeline.convert_to_images")
+    @patch("workers.tasks.file_pipeline.get_sync_db")
+    def test_save_ocr_page_failure_fails_pipeline(
+        self,
+        mock_get_sync_db,
+        mock_convert_to_images,
+        mock_ensure_pdf_in_workspace,
+        mock_return_list_images_path,
+        mock_extract_image_text,
+        mock_save_ocr_page,
+        mock_format_all_markdown,
+        mock_redis,
+    ):
+        document_id = "11111111-1111-1111-1111-111111111111"
+
+        mock_doc = MagicMock()
+        mock_doc.id = document_id
+        mock_doc.workspace_id = "22222222-2222-2222-2222-222222222222"
+        mock_doc.original_filename = "test.pdf"
+        mock_doc.stored_filename = "test.pdf"
+        mock_doc.mime_type = "application/pdf"
+        mock_doc.page_count = 2
+
+        mock_query = MagicMock()
+        mock_query.filter_by.return_value.first.return_value = mock_doc
+
+        mock_session = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_session.__enter__.return_value = mock_session
+
+        mock_get_sync_db.return_value = mock_session
+        mock_convert_to_images.return_value = [MagicMock(converted_to_extension="png")]
+        mock_return_list_images_path.return_value = ["p1.png", "p2.png"]
+        mock_extract_image_text.return_value = "text"
+        mock_save_ocr_page.side_effect = RuntimeError("disk is full")
+
+        task = _mock_task()
+
+        with pytest.raises(RuntimeError, match="Failed to save OCR page 1"):
+            task.run(document_id)
+
+        mock_format_all_markdown.assert_not_called()
+        assert mock_doc.status == FileStatus.FAILED.value
 
 
 @pytest.mark.unit

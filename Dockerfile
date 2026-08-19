@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     gosu \
     libreoffice \
+    fonts-noto-cjk \
+    fontconfig \
+    && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3.12 -m venv /opt/venv

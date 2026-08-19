@@ -14,6 +14,7 @@ from app.services.storage.workspace import (
     create_workspace,
     disable_workspace,
     get_workspaces_tree_json,
+    list_workspaces,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["workspace"])
@@ -49,6 +50,18 @@ async def get_workspace_tree_endpoint(
 ):
     tree = await get_workspaces_tree_json(db)
     return WorkspaceTreeResponse(workspaces=tree)
+
+
+@router.get(
+    "/workspace/list",
+    response_model=list[WorkspaceResponse],
+    status_code=status.HTTP_200_OK,
+)
+async def list_workspaces_endpoint(
+    db: AsyncSession = Depends(get_db),
+):
+    workspaces = await list_workspaces(db)
+    return [WorkspaceResponse.model_validate(workspace) for workspace in workspaces]
 
 
 @router.post(

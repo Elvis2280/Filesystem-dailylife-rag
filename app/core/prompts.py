@@ -4,82 +4,95 @@ Centralizes prompt engineering for OCR, translation, and other AI tasks
 so callers only pass model + prompt to the generic Ollama clients.
 """
 
-OCR_PROMPT = """
-You are a high-accuracy OCR engine.
+OCR_PROMPT = """You are a multilingual high-precision OCR engine. Your task is to transcribe all text visible in the image exactly as it is, preserving the target language (Japanese, English, Spanish, etc.).
 
-Your ONLY task is to transcribe every visible character from this page.
+Step 1: First, identify the language(s) present in the image and locate all text regions.
+Step 2: Transcribe every single character exactly as written without translating, interpreting, or summarizing.
 
-## Extraction Rules
+Guidelines:
+- DO NOT translate Japanese or any other language into French, English, or any other language.
+- DO NOT invent or hallucinate content not present in the image.
+- Preserve vertical reading, headers, tables, numbers, and symbols.
+- If text is written in Japanese, return the text in Japanese characters (Kanji, Hiragana, Katakana).
 
-- Read the page in natural reading order (top to bottom, left to right).
-- Extract ALL visible text.
-- Never skip text because it appears small, faint, rotated, vertical, or inside another element.
-- Include text found inside:
-  - photographs
-  - posters
-  - screenshots
-  - diagrams
-  - charts
-  - tables
-  - logos
-  - icons
-  - labels
-  - forms
-  - stamps
-  - handwritten notes (if readable)
-
-## Fidelity Rules
-
-- Preserve every language exactly as shown.
-- Preserve capitalization.
-- Preserve punctuation.
-- Preserve numbers.
-- Preserve symbols.
-- Preserve line breaks whenever possible.
-- Preserve the original reading order.
-
-For tables:
-- Output one row per line.
-- Separate columns using a TAB character.
-
-Do NOT:
-- summarize
-- translate
-- correct spelling
-- interpret meaning
-- classify content
-- identify headings
-- generate JSON
-- generate Markdown
-- wrap the output in code fences
-- add explanations
-- add comments
-
-Return ONLY the extracted UTF-8 plain text.
-If a page contains little or no text, return whatever text is visible.
-"""
+Output format:
+Return ONLY the raw transcribed text. Do not add explanations or notes."""
 
 FORMAT_TO_MARKDOWN_PROMP = """
-You are a document formatter.
+You are a deterministic document-to-Markdown formatter.
 
-You will receive raw OCR text extracted from one document page.
+You will receive raw OCR text extracted from a document.
 
-Your task is to reconstruct the document as GitHub-Flavored Markdown.
+Your ONLY task is to convert the provided OCR text into clean GitHub-Flavored Markdown.
 
-Rules:
-- Preserve every piece of text.
-- Never summarize.
-- Never translate.
-- Never correct grammar.
-- Never remove duplicated text.
-- Detect headings from visual spacing and capitalization.
-- Convert tab-separated rows into Markdown tables.
-- Convert obvious lists into bullet lists.
-- Preserve multilingual text exactly.
-- Preserve reading order.
-- Keep paragraphs separated.
+The input may contain ANY language, including:
+- English
+- Japanese
+- Chinese
+- Korean
+- Spanish
+- mixed multilingual content
 
-Return only Markdown.
+Language does not change the formatting rules.
+
+CRITICAL CONTENT PRESERVATION RULES:
+- Preserve ALL text from the input.
+- Preserve Japanese characters exactly as provided.
+- Preserve Chinese characters exactly as provided.
+- Preserve Korean characters exactly as provided.
+- Preserve Latin characters exactly as provided.
+- Do NOT translate.
+- Do NOT romanize Japanese.
+- Do NOT transliterate any language.
+- Do NOT summarize.
+- Do NOT rewrite.
+- Do NOT correct grammar or spelling.
+- Do NOT replace words with synonyms.
+- Do NOT remove duplicated content.
+- Do NOT invent missing content.
+- Do NOT add explanations.
+- The OCR text is the ONLY source of truth.
+
+MARKDOWN FORMATTING RULES:
+
+1. Identify document titles and section titles and represent them using Markdown headings.
+
+2. Preserve paragraphs as separate Markdown paragraphs.
+
+3. Convert obvious bullet/list structures into Markdown lists.
+
+4. Preserve nested lists using Markdown indentation.
+
+5. Preserve numbered lists as numbered Markdown lists.
+
+6. Preserve the original order of all content.
+
+7. If the structure is ambiguous, DO NOT invent structure.
+  Keep the content as paragraphs instead.
+
+8. If tab-separated content represents rows and columns, convert it into a Markdown table.
+
+9. Preserve numbers, measurements, punctuation, symbols, and special characters exactly.
+
+10. Do not interpret the meaning of the text in order to change its structure.
+
+IMPORTANT:
+Japanese text such as:
+和風照り焼きチキンマヨピザ
+材料1人分
+● 皮：直径25cmの生地を1枚
+
+must be treated exactly like English text such as:
+Classic Margherita Pizza
+Ingredients
+- 1 pizza dough
+
+Do not translate or modify the Japanese text.
+
+OUTPUT:
+Return ONLY the Markdown.
+Do not wrap the result in ```markdown.
+Do not include explanations before or after the Markdown.
 """
 
 TRANSLATE_TO_ENGLISH_PROMPT = (

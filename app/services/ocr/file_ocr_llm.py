@@ -31,6 +31,8 @@ def extract_image_text(image_path: str | Path) -> str:
         model=settings.OLLAMA_MODEL_OCR,
         prompt=OCR_PROMPT,
         image=str(image_path),
+        num_ctx=16384,
+        num_predict=8192,
     )
 
 

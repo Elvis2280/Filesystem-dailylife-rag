@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.core.constant import LanguageOptions
 from app.models.file_conversions import FileConversionModel
 
 
@@ -18,10 +19,11 @@ class TestFormatAllMarkdown:
         with pytest.raises(ValueError, match="No files txt for this operation"):
             format_all_markdown("ws-1", "doc-1", db_session)
 
+    @patch("app.services.format.format._should_translate", return_value=True)
     @patch("app.services.format.format.translate_content")
     @patch("app.services.format.format.format_markdown")
     def test_generates_translated_md_files(
-        self, mock_format_markdown, mock_translate_content
+        self, mock_format_markdown, mock_translate_content, mock_should_translate
     ):
         mock_txt_1 = MagicMock(spec=FileConversionModel)
         mock_txt_1.converted_file_path = "/tmp/dummy_page_001.txt"
@@ -63,10 +65,11 @@ class TestFormatAllMarkdown:
         assert db_session.add.call_count == 10
         assert db_session.commit.call_count == 10
 
+    @patch("app.services.format.format._should_translate", return_value=True)
     @patch("app.services.format.format.translate_content")
     @patch("app.services.format.format.format_markdown")
     def test_skips_existing_md_files(
-        self, mock_format_markdown, mock_translate_content
+        self, mock_format_markdown, mock_translate_content, mock_should_translate
     ):
         mock_txt = MagicMock(spec=FileConversionModel)
         mock_txt.converted_file_path = "/tmp/dummy_page_001.txt"
@@ -118,10 +121,11 @@ class TestFormatAllMarkdown:
         # No match
         assert _extract_page_number("/app/brain/ws/doc-2_random.txt", "doc-2") == 0
 
+    @patch("app.services.format.format._should_translate", return_value=True)
     @patch("app.services.format.format.translate_content")
     @patch("app.services.format.format.format_markdown")
     def test_continues_on_per_page_failure(
-        self, mock_format_markdown, mock_translate_content
+        self, mock_format_markdown, mock_translate_content, mock_should_translate
     ):
         mock_txt_1 = MagicMock(spec=FileConversionModel)
         mock_txt_1.converted_file_path = "/tmp/ok_page_001.txt"
@@ -168,3 +172,121 @@ class TestFormatAllMarkdown:
         # Page 2 failed on translations: 1 add (original only)
         assert db_session.add.call_count == 6
         assert mock_format_markdown.call_count == 4
+
+
+@pytest.mark.unit
+class TestShouldTranslate:
+    def test_english_content_to_english_returns_false(self):
+        from app.services.format.format import _should_translate
+
+        result = _should_translate(
+            "This is a simple English sentence about documents.",
+            LanguageOptions.ENGLISH,
+        )
+        assert result is False
+
+    def test_english_content_to_japanese_returns_true(self):
+        from app.services.format.format import _should_translate
+
+        result = _should_translate(
+            "This is a simple English sentence about documents.",
+            LanguageOptions.JAPANESE,
+        )
+        assert result is True
+
+    def test_japanese_content_to_japanese_returns_false(self):
+        from app.services.format.format import _should_translate
+
+        result = _should_translate(
+            "これは日本語のテキストです。文書についての内容です。",
+            LanguageOptions.JAPANESE,
+        )
+        assert result is False
+
+    def test_japanese_content_to_english_returns_true(self):
+        from app.services.format.format import _should_translate
+
+        result = _should_translate(
+            "これは日本語のテキストです。文書についての内容です。",
+            LanguageOptions.ENGLISH,
+        )
+        assert result is True
+
+    def test_unsupported_target_returns_true(self):
+        from app.services.format.format import _should_translate
+
+        assert _should_translate("any text", LanguageOptions.MIXED) is True
+
+
+@pytest.mark.unit
+class TestFormatAllMarkdownSkipTranslation:
+    @patch("app.services.format.format._should_translate", return_value=False)
+    @patch("app.services.format.format.translate_content")
+    @patch("app.services.format.format.format_markdown")
+    def test_uses_original_text_when_translation_skipped(
+        self, mock_format_markdown, mock_translate_content, mock_should_translate
+    ):
+        mock_txt = MagicMock(spec=FileConversionModel)
+        mock_txt.converted_file_path = "/tmp/dummy_page_001.txt"
+
+        db_session = MagicMock()
+        db_session.execute.return_value.scalars.return_value.all.return_value = [
+            mock_txt
+        ]
+        db_session.execute.return_value.scalars.return_value.first.return_value = None
+
+        with (
+            patch("pathlib.Path.mkdir"),
+            patch("pathlib.Path.exists", return_value=False),
+        ):
+            from app.services.format.format import format_all_markdown
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                f = Path(tmpdir) / "dummy_page_001.txt"
+                f.write_text("page one", encoding="utf-8")
+                mock_txt.converted_file_path = str(f)
+
+                format_all_markdown("ws-1", "doc-1", db_session)
+
+        mock_translate_content.assert_not_called()
+        assert mock_format_markdown.call_count == 3
+        assert all(
+            call.args[0] == "page one" for call in mock_format_markdown.call_args_list
+        )
+
+    @patch("app.services.format.format._should_translate")
+    @patch("app.services.format.format.translate_content")
+    @patch("app.services.format.format.format_markdown")
+    def test_translates_only_when_needed_per_language(
+        self, mock_format_markdown, mock_translate_content, mock_should_translate
+    ):
+        mock_should_translate.side_effect = lambda text, lang: (
+            lang == (LanguageOptions.JAPANESE)
+        )
+        mock_txt = MagicMock(spec=FileConversionModel)
+        mock_txt.converted_file_path = "/tmp/dummy_page_001.txt"
+
+        db_session = MagicMock()
+        db_session.execute.return_value.scalars.return_value.all.return_value = [
+            mock_txt
+        ]
+        db_session.execute.return_value.scalars.return_value.first.return_value = None
+
+        with (
+            patch("pathlib.Path.mkdir"),
+            patch("pathlib.Path.exists", return_value=False),
+        ):
+            from app.services.format.format import format_all_markdown
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                f = Path(tmpdir) / "dummy_page_001.txt"
+                f.write_text("page one", encoding="utf-8")
+                mock_txt.converted_file_path = str(f)
+
+                format_all_markdown("ws-1", "doc-1", db_session)
+
+        mock_should_translate.assert_called()
+        assert mock_translate_content.call_count == 1
+        mock_translate_content.assert_called_once_with(
+            "page one", LanguageOptions.JAPANESE
+        )

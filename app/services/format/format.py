@@ -2,6 +2,7 @@ import logging
 import re
 from pathlib import Path
 
+from lingua import Language, LanguageDetectorBuilder
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
@@ -15,6 +16,39 @@ from app.services.language.translation import translate_content
 logger = logging.getLogger("memory_rag.format")
 
 List_Lang: list[LanguageOptions] = [LanguageOptions.ENGLISH, LanguageOptions.JAPANESE]
+
+TRANSLATE_CONFIDENCE_THRESHOLD = 0.95
+
+_detector = None
+
+
+def _get_detector():
+    """Build and cache the Lingua English/Japanese detector."""
+    global _detector
+    if _detector is None:
+        _detector = LanguageDetectorBuilder.from_languages(
+            Language.ENGLISH, Language.JAPANESE
+        ).build()
+    return _detector
+
+
+def _should_translate(page_text: str, target_language: LanguageOptions) -> bool:
+    """Return True when the page must be translated with Ollama.
+
+    If the page is already (>= 95%) in the target language, translation is
+    unnecessary and the original text can be used directly to build the
+    translated Markdown file.
+    """
+    if target_language not in (LanguageOptions.ENGLISH, LanguageOptions.JAPANESE):
+        return True
+
+    detector = _get_detector()
+    if target_language == LanguageOptions.ENGLISH:
+        confidence = detector.compute_language_confidence(page_text, Language.ENGLISH)
+    else:
+        confidence = detector.compute_language_confidence(page_text, Language.JAPANESE)
+
+    return confidence < TRANSLATE_CONFIDENCE_THRESHOLD
 
 
 def format_all_markdown(
@@ -73,6 +107,8 @@ def format_all_markdown(
             print(f"Formatting original page {page_number} for document {document_id}")
             print(f"Page text: {page_text[:100]}...")
             original_md = format_markdown(page_text)
+            print("FORMAT RESULT:")
+            print(repr(original_md))
             original_path = original_dir / f"{base_filename}.md"
             _save_md(original_path, original_md, document_id, db_session)
         except Exception as e:
@@ -85,7 +121,15 @@ def format_all_markdown(
 
         for lang in List_Lang:
             try:
-                translated_text = translate_content(page_text, lang)
+                if _should_translate(page_text, lang):
+                    translated_text = translate_content(page_text, lang)
+                else:
+                    logger.info(
+                        "Page %d already in %s; skipping translation",
+                        page_number,
+                        lang.value,
+                    )
+                    translated_text = page_text
                 translated_md = format_markdown(translated_text)
             except Exception as e:
                 logger.error(
