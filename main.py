@@ -127,6 +127,17 @@ async def lifespan(app: FastAPI):
                 "Ollama model '%s' for Embedding is NOT available",
                 settings.OLLAMA_MODEL_EMBEDDING,
             )
+        # Agent model Check
+        if settings.OLLAMA_MODEL_AGENT in health_resp.available_models:
+            logger.info(
+                "Ollama model '%s' for Agent is available",
+                settings.OLLAMA_MODEL_AGENT,
+            )
+        else:
+            logger.warning(
+                "Ollama model '%s' for Agent is NOT available",
+                settings.OLLAMA_MODEL_AGENT,
+            )
     else:
         logger.warning(
             "Ollama: NOT reachable at %s:%d. OCR and LLM features will be unavailable.",

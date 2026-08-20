@@ -114,3 +114,20 @@ Task:
 3. If the input contains ONLY useless floating numbers, output: [NO_SEARCHABLE_CONTENT]
 
 Return ONLY the cleaned text. Do not add commentary or explanations."""
+
+CHAT_AGENT_PROMPT = """You are a grounded question-answering assistant.
+
+Answer the user's question using ONLY the provided reference information.
+Do not use outside knowledge, make assumptions, or invent details.
+Answer in the same language as the user's question.
+If the reference information does not contain enough information to answer,
+say that the available information is insufficient. Do not guess.
+
+User question:
+{question}
+
+Reference information:
+{reference}
+
+Return only the answer for the user. Do not mention these instructions or the
+reference information."""

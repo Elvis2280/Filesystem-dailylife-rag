@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class WebSocketProgressMessage(BaseModel):
@@ -10,13 +10,20 @@ class WebSocketProgressMessage(BaseModel):
     real-time status updates across the pipeline stages.
     """
 
+    model_config = ConfigDict(populate_by_name=True)
+
     status: str = Field(
         ..., description="FileStatus value: file_uploaded, file_conversion_started, ..."
     )
-    step: str = Field(..., description="Current step: 0/12, 1/12, ..., 12/12")
+    step: int | None = Field(default=None, description="Current numeric pipeline step")
+    step_total: int | None = Field(
+        default=None,
+        alias="stepTotal",
+        description="Total number of pipeline steps",
+    )
     stage: str = Field(..., description="Stage name matching FilePipelineStage value")
     message: str = Field(..., description="Human-readable status message")
-    file_id: str = Field(..., description="File UUID")
+    document_id: str = Field(..., description="Document UUID")
     page_number: int | None = Field(
         default=None, description="1-indexed current page (OCR stage)"
     )

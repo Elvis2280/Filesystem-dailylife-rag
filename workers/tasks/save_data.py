@@ -31,7 +31,8 @@ def _publish_status(
 ):
     payload = {
         "status": status,
-        "step": stage.step,
+        "step": stage.step_number,
+        "stepTotal": stage.step_total,
         "stage": stage.value,
         "message": message or stage.message,
         "document_id": document_id,

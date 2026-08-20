@@ -12,6 +12,10 @@ from app.core.config import settings
 from app.schemas.ollama import OllamaStatusResponse
 
 
+class OllamaTimeoutError(RuntimeError):
+    """Raised when Ollama does not respond within the configured timeout."""
+
+
 class OllamaClient:
     """Async HTTP client for Ollama server communication.
 
@@ -74,6 +78,7 @@ class OllamaClient:
         num_ctx: int = 16384,
         num_predict: int = 2048,
         temperature: float = 0,
+        think: bool = False,
     ) -> str:
         """Send an async chat request to Ollama with model, prompt, and optional image.
 
@@ -86,6 +91,7 @@ class OllamaClient:
             prompt: Text prompt instructing the model.
             image_base64: Base64-encoded image string. If None, a text-only
                 request is sent.
+            think: Whether Ollama should enable the model's thinking mode.
 
         Returns:
             Generated text response from the model.
@@ -118,6 +124,10 @@ class OllamaClient:
             except httpx.HTTPStatusError as e:
                 raise RuntimeError(
                     f"Ollama generation failed (HTTP error {e.response.status_code}): {e.response.text}"
+                ) from e
+            except httpx.TimeoutException as e:
+                raise OllamaTimeoutError(
+                    f"Ollama generation timed out after {self.timeout} seconds"
                 ) from e
             except Exception as e:
                 raise RuntimeError(f"Ollama generation failed: {e}") from e

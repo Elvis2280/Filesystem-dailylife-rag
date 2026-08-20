@@ -9,12 +9,24 @@ import json
 import logging
 from uuid import UUID
 
-from app.core.constant import FileStatus
+from app.core.constant import FileStatus, PIPELINE_STEP_TOTAL
 from app.core.database import async_session
 from app.core.redis_client import get_async_redis_client
 from app.core.websocket_manager import manager
 
 logger = logging.getLogger("memory_rag.ws.document_status")
+
+
+def _parse_step_number(step: str | int | None) -> int | None:
+    """Convert current and legacy persisted step values to a number."""
+    if step is None:
+        return None
+
+    try:
+        return int(str(step).split("/", 1)[0])
+    except (TypeError, ValueError):
+        logger.warning("Invalid persisted pipeline step: %r", step)
+        return None
 
 
 async def _get_current_state(document_id: str) -> dict | None:
@@ -45,7 +57,8 @@ async def _get_current_state(document_id: str) -> dict | None:
                 "type": "current_state",
                 "status": history.status,
                 "stage": history.stage,
-                "step": history.step,
+                "step": _parse_step_number(history.step),
+                "stepTotal": PIPELINE_STEP_TOTAL,
                 "message": history.message,
                 "document_id": document_id,
                 "page_number": history.page_number,
@@ -67,6 +80,7 @@ async def _get_current_state(document_id: str) -> dict | None:
             "status": doc.status or "",
             "stage": None,
             "step": None,
+            "stepTotal": PIPELINE_STEP_TOTAL,
             "message": "Pending",
             "document_id": document_id,
             "page_number": None,

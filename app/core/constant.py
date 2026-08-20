@@ -25,6 +25,8 @@ class FileStatus(str, Enum):
 
 # --- File Pipeline Stages ---
 
+PIPELINE_STEP_TOTAL = 12
+
 
 class FilePipelineStage(str, Enum):
     PENDING = "pending"
@@ -43,24 +45,34 @@ class FilePipelineStage(str, Enum):
     FAILED = "failed"
 
     @property
-    def step(self) -> str:
+    def step_number(self) -> int:
         _steps = {
-            "pending": "0/12",
-            "pdf_conversion": "1/12",
-            "image_conversion": "2/12",
-            "ocr_processing": "3/12",
-            "language_detection": "4/12",
-            "translation": "5/12",
-            "creating_markdown_files": "6/12",
-            "file_process_finished": "7/12",
-            "verify_files": "8/12",
-            "collecting_data": "9/12",
-            "preparing_data": "10/12",
-            "saving_data": "11/12",
-            "completed": "12/12",
-            "failed": "0/12",
+            "pending": 0,
+            "pdf_conversion": 1,
+            "image_conversion": 2,
+            "ocr_processing": 3,
+            "language_detection": 4,
+            "translation": 5,
+            "creating_markdown_files": 6,
+            "file_process_finished": 7,
+            "verify_files": 8,
+            "collecting_data": 9,
+            "preparing_data": 10,
+            "saving_data": 11,
+            "completed": 12,
+            "failed": 0,
         }
         return _steps[self.value]
+
+    @property
+    def step(self) -> str:
+        """Return the legacy fraction stored in document history."""
+        return f"{self.step_number}/{PIPELINE_STEP_TOTAL}"
+
+    @property
+    def step_total(self) -> int:
+        """Return the total number of pipeline steps exposed to clients."""
+        return PIPELINE_STEP_TOTAL
 
     @property
     def message(self) -> str:

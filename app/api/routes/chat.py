@@ -1,4 +1,3 @@
-import asyncio
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -8,7 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.models.workspace import WorkspaceModel
-from app.services.rag.chat import NoResultsError, search_data
+from app.services.ai.ollama_client import OllamaTimeoutError
+from app.services.chat.agent import EmptyAgentResponseError
+from app.services.chat.chat import (
+    InvalidChatContextError,
+    InvalidChatMessageError,
+    NoResultsError,
+    answer_chat,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
@@ -25,10 +31,16 @@ class ChatRequest(BaseModel):
         return value
 
 
+class ChatMatch(BaseModel):
+    label: str
+    english: str
+    japanese: str
+
+
 class ChatResponse(BaseModel):
-    message_received: bool
-    message: str
-    results: list[dict] = Field(default_factory=list)
+    original_message: str
+    response: str
+    raw_response: list[ChatMatch] = Field(default_factory=list)
 
 
 @router.post(
@@ -40,11 +52,7 @@ async def chat(
     request: ChatRequest,
     db: AsyncSession = Depends(get_db),
 ) -> ChatResponse:
-    """Receive a chat message and search the vector store.
-
-    Embeds the message with bge-m3 and returns the top matching chunks
-    from Qdrant scoped to the given workspace.
-    """
+    """Generate a grounded answer from workspace-scoped document matches."""
     workspace_id = str(request.workspace_id)
 
     result = await db.execute(
@@ -58,25 +66,52 @@ async def chat(
         )
 
     try:
-        results = await asyncio.to_thread(search_data, request.message, workspace_id)
+        chat_answer = await answer_chat(request.message, workspace_id)
+    except InvalidChatMessageError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        ) from e
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+        ) from e
     except NoResultsError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e),
-        )
-    except ValueError as e:
+        ) from e
+    except OllamaTimeoutError as e:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail=str(e),
-        )
+        ) from e
+    except EmptyAgentResponseError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(e),
+        ) from e
+    except InvalidChatContextError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(e),
+        ) from e
     except RuntimeError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(e),
-        )
+        ) from e
 
     return ChatResponse(
-        message_received=True,
-        message=request.message,
-        results=results,
+        original_message=request.message,
+        response=chat_answer.response,
+        raw_response=[
+            ChatMatch(
+                label=f"A{index}",
+                english=str((match.get("payload") or {}).get("text") or ""),
+                japanese=str((match.get("payload") or {}).get("japanese_text") or ""),
+            )
+            for index, match in enumerate(chat_answer.matches, start=1)
+        ],
     )
