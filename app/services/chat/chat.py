@@ -5,7 +5,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.services.chat.agent import generate_answer
-from app.services.rag.chat import NoResultsError, search_data
+from app.services.rag.chat import (
+    NO_RELATED_DATA_MESSAGE,
+    NoResultsError,
+    search_data,
+)
 
 
 class InvalidChatMessageError(ValueError):
@@ -41,7 +45,7 @@ async def answer_chat(
         top_k,
     )
     if not matches:
-        raise NoResultsError("No matching data found in vector store")
+        raise NoResultsError(NO_RELATED_DATA_MESSAGE)
 
     first_payload = matches[0].get("payload") or {}
     reference = str(first_payload.get("text") or "").strip()

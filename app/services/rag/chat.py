@@ -5,6 +5,10 @@ from app.services.rag.qdrant_client import search_embeddings
 
 logger = logging.getLogger("memory_rag.chat")
 
+NO_RELATED_DATA_MESSAGE = (
+    "No data related found, upload the relevant information and try again"
+)
+
 
 class NoResultsError(Exception):
     """Raised when a vector search returns no results."""
@@ -49,6 +53,6 @@ def search_data(
     results = search_embeddings(query_vector, workspace_id, limit=top_k)
     if not results:
         logger.info("No results found for message in workspace %s", workspace_id)
-        raise NoResultsError("No matching data found in vector store")
+        raise NoResultsError(NO_RELATED_DATA_MESSAGE)
 
     return results
