@@ -25,13 +25,14 @@ Startup Validation:
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes.chat import router as chat_router
 from app.api.routes.document import router as document_router
 from app.api.routes.workspace import router as workspace_router
+from app.core.api_key import is_api_key_valid
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.requirements_checker import validate_all
@@ -164,6 +165,25 @@ app = FastAPI(
     redoc_url=settings.REDOC_URL,
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    """Require the configured API key for protected HTTP endpoints."""
+    if (
+        not settings.API_KEY
+        or request.method == "OPTIONS"
+        or request.url.path in {"/", "/health"}
+    ):
+        return await call_next(request)
+
+    if not is_api_key_valid(request.headers.get("X-API-Key")):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Missing or invalid API key"},
+        )
+
+    return await call_next(request)
 
 
 app.add_middleware(

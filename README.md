@@ -218,6 +218,15 @@ docker-compose -f docker-compose.prod.yml up --build -d
 
 API available at `http://localhost/` (via nginx on port 80).
 
+### Coolify Dev Testing
+
+For the remote Tauri Dev Testing environment, deploy the dedicated
+[`docker-compose.coolify.yml`](docker-compose.coolify.yml) stack and follow
+[`COOLIFY_DEV_TESTING.md`](COOLIFY_DEV_TESTING.md). It uses Coolify HTTPS for
+the API, internal service networking, named persistent volumes, NVIDIA Ollama,
+automatic migrations, and model initialization. The local development Compose
+file remains unchanged.
+
 **Differences from dev:**
 
 | | Dev | Prod |

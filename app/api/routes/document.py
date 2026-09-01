@@ -18,6 +18,7 @@ from fastapi import (
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.api_key import is_api_key_valid
 from app.core.constant import ALLOWED_UPLOAD_MIME_TYPES
 from app.core.database import get_db
 from app.core.redis_client import get_async_redis_client
@@ -187,6 +188,15 @@ async def get_document_status(
 
 @router.websocket("/documents/{document_id}/ws")
 async def websocket_document_status(websocket: WebSocket, document_id: str):
+    candidate_keys = (
+        websocket.headers.get("X-API-Key"),
+        websocket.query_params.get("api_key"),
+    )
+    if not any(is_api_key_valid(candidate) for candidate in candidate_keys):
+        await websocket.accept()
+        await websocket.close(code=1008, reason="Missing or invalid API key")
+        return
+
     await manager.connect(document_id, websocket)
     try:
         await stream_document_status(document_id)

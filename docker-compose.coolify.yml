@@ -1,0 +1,216 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-memoryrag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-memoryrag}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U '$$POSTGRES_USER' -d '$$POSTGRES_DB'"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 15s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    environment: &app_environment
+      IS_DEVELOPMENT: "false"
+      DEBUG: "false"
+      DEBUGPY: "false"
+      API_KEY: ${API_KEY:?API_KEY is required}
+      CORS_ORIGINS: ${CORS_ORIGINS:-tauri://localhost,http://tauri.localhost}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-memoryrag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-memoryrag}
+      OLLAMA_HOST: ollama
+      OLLAMA_PORT: 11434
+      OLLAMA_MODEL_OCR: ${OLLAMA_MODEL_OCR:-glm-ocr:latest}
+      OLLAMA_MODEL_FORMAT: ${OLLAMA_MODEL_FORMAT:-qwen3.5:9b}
+      OLLAMA_MODEL_TRANSLATION: ${OLLAMA_MODEL_TRANSLATION:-qwen3.5:27b}
+      OLLAMA_MODEL_CLEANER: ${OLLAMA_MODEL_CLEANER:-qwen3.5:9b}
+      OLLAMA_MODEL_EMBEDDING: ${OLLAMA_MODEL_EMBEDDING:-bge-m3}
+      OLLAMA_MODEL_AGENT: ${OLLAMA_MODEL_AGENT:-qwen3.5:9b}
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-600}
+      BRAIN_PATH: /app/brain
+      BRAIN_WORKSPACES_PATH: /app/brain/workspaces
+      UPLOAD_PATH: /app/storage/uploads
+      TEMP_PATH: /app/temp_storage
+      TEMP_OCR_PATH: /app/temp_storage/ocr
+      CELERY_TASK_ALWAYS_EAGER: "false"
+    volumes:
+      - brain_data:/app/brain
+      - storage_data:/app/storage
+      - temp_data:/app/temp_storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  ollama-init:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL_OCR: ${OLLAMA_MODEL_OCR:-glm-ocr:latest}
+      OLLAMA_MODEL_FORMAT: ${OLLAMA_MODEL_FORMAT:-qwen3.5:9b}
+      OLLAMA_MODEL_TRANSLATION: ${OLLAMA_MODEL_TRANSLATION:-qwen3.5:27b}
+      OLLAMA_MODEL_CLEANER: ${OLLAMA_MODEL_CLEANER:-qwen3.5:9b}
+      OLLAMA_MODEL_EMBEDDING: ${OLLAMA_MODEL_EMBEDDING:-bge-m3}
+      OLLAMA_MODEL_AGENT: ${OLLAMA_MODEL_AGENT:-qwen3.5:9b}
+    volumes:
+      - ollama_data:/root/.ollama
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        set -eu;
+        seen="";
+        for model in
+        "$$OLLAMA_MODEL_OCR"
+        "$$OLLAMA_MODEL_FORMAT"
+        "$$OLLAMA_MODEL_TRANSLATION"
+        "$$OLLAMA_MODEL_CLEANER"
+        "$$OLLAMA_MODEL_EMBEDDING"
+        "$$OLLAMA_MODEL_AGENT"; do
+          case " $$seen " in *" $$model "*) continue;; esac;
+          echo "Pulling Ollama model $$model";
+          ollama pull "$$model";
+          seen="$$seen $$model";
+        done
+    depends_on:
+      ollama:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    expose:
+      - "8000"
+    environment: *app_environment
+    volumes:
+      - brain_data:/app/brain
+      - storage_data:/app/storage
+      - temp_data:/app/temp_storage
+      - model_cache:/home/appuser/.cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ollama-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python3.12", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["celery", "-A", "workers.celery_app", "worker", "--loglevel=info", "--pool=threads"]
+    environment: *app_environment
+    volumes:
+      - brain_data:/app/brain
+      - storage_data:/app/storage
+      - temp_data:/app/temp_storage
+      - model_cache:/home/appuser/.cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ollama-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  ollama_data:
+  brain_data:
+  storage_data:
+  temp_data:
+  model_cache:

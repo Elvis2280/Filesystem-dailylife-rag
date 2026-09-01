@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 from pydantic import Field, model_validator
@@ -12,6 +11,10 @@ class Settings(BaseSettings):
     # App
     APP_NAME: str = "Personal Memory RAG"
     DEBUG: bool = False
+    API_KEY: str | None = Field(default=None)
+    CORS_ORIGINS_VALUE: str | None = Field(
+        default=None, validation_alias="CORS_ORIGINS"
+    )
 
     # Derived from IS_DEVELOPMENT
     @property
@@ -24,11 +27,14 @@ class Settings(BaseSettings):
 
     @property
     def CORS_ORIGINS(self) -> list[str]:
+        if self.CORS_ORIGINS_VALUE:
+            return [
+                origin.strip()
+                for origin in self.CORS_ORIGINS_VALUE.split(",")
+                if origin.strip()
+            ]
         if not self.IS_DEVELOPMENT:
             return []
-        env = os.getenv("CORS_ORIGINS")
-        if env:
-            return [o.strip() for o in env.split(",") if o.strip()]
         return [
             "http://localhost:1420",
             "http://127.0.0.1:1420",
