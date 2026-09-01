@@ -35,27 +35,6 @@ services:
       retries: 12
     restart: unless-stopped
 
-  ollama:
-    image: ollama/ollama:latest
-    environment:
-      OLLAMA_HOST: 0.0.0.0:11434
-    volumes:
-      - ollama_data:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 10s
-      retries: 30
-      start_period: 15s
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    restart: unless-stopped
-
   migrate:
     build:
       context: .
@@ -77,7 +56,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-memoryrag}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-memoryrag}
-      OLLAMA_HOST: ollama
+      OLLAMA_HOST: ${OLLAMA_HOST:-host.docker.internal}
       OLLAMA_PORT: 11434
       OLLAMA_MODEL_OCR: ${OLLAMA_MODEL_OCR:-glm-ocr:latest}
       OLLAMA_MODEL_FORMAT: ${OLLAMA_MODEL_FORMAT:-qwen3.5:9b}
@@ -101,45 +80,17 @@ services:
         condition: service_healthy
     restart: "no"
 
-  ollama-init:
-    image: ollama/ollama:latest
-    environment:
-      OLLAMA_HOST: http://ollama:11434
-      OLLAMA_MODEL_OCR: ${OLLAMA_MODEL_OCR:-glm-ocr:latest}
-      OLLAMA_MODEL_FORMAT: ${OLLAMA_MODEL_FORMAT:-qwen3.5:9b}
-      OLLAMA_MODEL_TRANSLATION: ${OLLAMA_MODEL_TRANSLATION:-qwen3.5:27b}
-      OLLAMA_MODEL_CLEANER: ${OLLAMA_MODEL_CLEANER:-qwen3.5:9b}
-      OLLAMA_MODEL_EMBEDDING: ${OLLAMA_MODEL_EMBEDDING:-bge-m3}
-      OLLAMA_MODEL_AGENT: ${OLLAMA_MODEL_AGENT:-qwen3.5:9b}
-    volumes:
-      - ollama_data:/root/.ollama
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - >-
-        set -eu;
-        seen="";
-        for model in
-        "$$OLLAMA_MODEL_OCR"
-        "$$OLLAMA_MODEL_FORMAT"
-        "$$OLLAMA_MODEL_TRANSLATION"
-        "$$OLLAMA_MODEL_CLEANER"
-        "$$OLLAMA_MODEL_EMBEDDING"
-        "$$OLLAMA_MODEL_AGENT"; do
-          case " $$seen " in *" $$model "*) continue;; esac;
-          echo "Pulling Ollama model $$model";
-          ollama pull "$$model";
-          seen="$$seen $$model";
-        done
+  ollama-check:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python3.12", "-m", "app.services.ai.ollama_preflight"]
+    environment: *app_environment
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
-      ollama:
+      postgres:
         condition: service_healthy
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     restart: "no"
 
   api:
@@ -150,6 +101,8 @@ services:
     expose:
       - "8000"
     environment: *app_environment
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - brain_data:/app/brain
       - storage_data:/app/storage
@@ -164,7 +117,7 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-      ollama-init:
+      ollama-check:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python3.12", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
@@ -184,6 +137,8 @@ services:
       dockerfile: Dockerfile
     command: ["celery", "-A", "workers.celery_app", "worker", "--loglevel=info", "--pool=threads"]
     environment: *app_environment
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - brain_data:/app/brain
       - storage_data:/app/storage
@@ -198,7 +153,7 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-      ollama-init:
+      ollama-check:
         condition: service_completed_successfully
     restart: unless-stopped
     deploy:
@@ -209,7 +164,6 @@ services:
 volumes:
   postgres_data:
   qdrant_data:
-  ollama_data:
   brain_data:
   storage_data:
   temp_data:
