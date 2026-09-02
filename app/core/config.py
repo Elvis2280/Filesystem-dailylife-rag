@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     OLLAMA_MODEL_FORMAT: str = "qwen3.5:9b"
     OLLAMA_MODEL_TRANSLATION: str = "qwen3.5:27b"
     OLLAMA_MODEL_CLEANER: str = "qwen3.5:9b"
-    OLLAMA_MODEL_EMBEDDING: str = "bge-m3"
+    OLLAMA_MODEL_EMBEDDING: str = "bge-m3:latest"
     OLLAMA_MODEL_AGENT: str = "qwen3.5:9b"
     OLLAMA_TIMEOUT: int = 600
 

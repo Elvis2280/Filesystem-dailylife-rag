@@ -22,9 +22,9 @@ second Ollama container. GPU support is managed by the host Ollama installation.
 1. Create a Docker Compose application in Coolify connected to this repository.
 2. Select the `develop` branch.
 3. Set the Compose file to `docker-compose.coolify.yml`.
-4. Configure a domain for the `api` service targeting its internal port `8000`.
-   Coolify should terminate HTTPS, so the Tauri client uses the resulting
-   `https://` URL.
+4. Leave the `api` service domain empty. The API is published on the server's
+   private LAN address at `192.168.100.61:18080` for clients on the same
+   network.
 5. Configure host Ollama as described below.
 6. Add the environment variables below and deploy.
 
@@ -114,7 +114,7 @@ WebSocket, send the key as `X-API-Key` when supported by the client or as the
 query parameter `api_key`:
 
 ```text
-wss://<coolify-domain>/api/v1/documents/<document-id>/ws?api_key=<API_KEY>
+ws://192.168.100.61:18080/api/v1/documents/<document-id>/ws?api_key=<API_KEY>
 ```
 
 The key is appropriate for Dev Testing access control, but a key embedded in a
@@ -140,16 +140,31 @@ storage outside this Coolify application. Keep the Compose volumes when
 redeploying and back up both those volumes and the host Ollama model directory
 according to the server's storage policy.
 
-Only the API is exposed through Coolify. PostgreSQL, Redis, Qdrant, and Ollama
-do not publish host ports.
+The API container's port `8000` is published only on the server's private LAN
+address as `192.168.100.61:18080`. PostgreSQL, Redis, Qdrant, and Ollama do not
+publish host ports through this Compose stack. Do not configure router port
+forwarding for `18080`; restrict any host or upstream firewall rule to the
+trusted LAN.
 
 ## Tauri configuration
 
-Use the Coolify HTTPS domain as the Dev Testing API base URL:
+Verify the API from the server after deployment:
+
+```bash
+curl http://192.168.100.61:18080/health
+```
+
+From each client computer on the same LAN, verify direct access:
+
+```bash
+curl http://192.168.100.61:18080/health
+```
+
+Use the server's private address as the Dev Testing API base URL:
 
 ```text
-REST:      https://<coolify-domain>
-WebSocket: wss://<coolify-domain>/api/v1/documents/<document-id>/ws?api_key=<API_KEY>
+REST:      http://192.168.100.61:18080
+WebSocket: ws://192.168.100.61:18080/api/v1/documents/<document-id>/ws?api_key=<API_KEY>
 ```
 
 Include `X-API-Key: <API_KEY>` on REST requests. If the Tauri client runs with a
@@ -166,7 +181,9 @@ different origin, add that exact origin to `CORS_ORIGINS` and redeploy.
 - Protected REST requests return `401` without a valid API key and succeed with
   the configured key.
 - WebSocket connections reject invalid keys with close code `1008`.
+- The API is not assigned a Coolify domain and is reachable from a separate PC
+  on the trusted LAN.
 - Upload, document processing, progress notifications, chat, and workspace
-  operations work through the HTTPS domain.
+  operations work over the private LAN address.
 - Re-deploying preserves database, Qdrant, Ollama, brain, and uploaded data.
 - The existing local Compose stack still starts with reload and local mounts.
