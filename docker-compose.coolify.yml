@@ -101,7 +101,7 @@ services:
     expose:
       - "8000"
     ports:
-      - "192.168.100.61:18080:8000"
+      - "${RAG_HTTP_PORT:-18080}:8000"
     environment: *app_environment
     extra_hosts:
       - "host.docker.internal:host-gateway"

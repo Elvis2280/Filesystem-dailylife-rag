@@ -23,7 +23,7 @@ second Ollama container. GPU support is managed by the host Ollama installation.
 2. Select the `develop` branch.
 3. Set the Compose file to `docker-compose.coolify.yml`.
 4. Leave the `api` service domain empty. The API is published on the server's
-   private LAN address at `192.168.100.61:18080` for clients on the same
+   private LAN address at `<server-lan-ip>:18080` for clients on the same
    network.
 5. Configure host Ollama as described below.
 6. Add the environment variables below and deploy.
@@ -114,7 +114,7 @@ WebSocket, send the key as `X-API-Key` when supported by the client or as the
 query parameter `api_key`:
 
 ```text
-ws://192.168.100.61:18080/api/v1/documents/<document-id>/ws?api_key=<API_KEY>
+ws://<server-lan-ip>:18080/api/v1/documents/<document-id>/ws?api_key=<API_KEY>
 ```
 
 The key is appropriate for Dev Testing access control, but a key embedded in a
@@ -141,7 +141,7 @@ redeploying and back up both those volumes and the host Ollama model directory
 according to the server's storage policy.
 
 The API container's port `8000` is published only on the server's private LAN
-address as `192.168.100.61:18080`. PostgreSQL, Redis, Qdrant, and Ollama do not
+address as `<server-lan-ip>:18080`. PostgreSQL, Redis, Qdrant, and Ollama do not
 publish host ports through this Compose stack. Do not configure router port
 forwarding for `18080`; restrict any host or upstream firewall rule to the
 trusted LAN.
@@ -151,20 +151,20 @@ trusted LAN.
 Verify the API from the server after deployment:
 
 ```bash
-curl http://192.168.100.61:18080/health
+curl http://<server-lan-ip>:18080/health
 ```
 
 From each client computer on the same LAN, verify direct access:
 
 ```bash
-curl http://192.168.100.61:18080/health
+curl http://<server-lan-ip>:18080/health
 ```
 
 Use the server's private address as the Dev Testing API base URL:
 
 ```text
-REST:      http://192.168.100.61:18080
-WebSocket: ws://192.168.100.61:18080/api/v1/documents/<document-id>/ws?api_key=<API_KEY>
+REST:      http://<server-lan-ip>:18080
+WebSocket: ws://<server-lan-ip>:18080/api/v1/documents/<document-id>/ws?api_key=<API_KEY>
 ```
 
 Include `X-API-Key: <API_KEY>` on REST requests. If the Tauri client runs with a
