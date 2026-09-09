@@ -8,7 +8,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U '$$POSTGRES_USER' -d '$$POSTGRES_DB'"]
+      test: ['CMD-SHELL', "pg_isready -U '$$POSTGRES_USER' -d '$$POSTGRES_DB'"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -18,7 +18,7 @@ services:
   redis:
     image: redis:7-alpine
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 3s
       retries: 12
@@ -29,7 +29,7 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
+      test: ['CMD-SHELL', "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -39,11 +39,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["alembic", "upgrade", "head"]
+    command: ['alembic', 'upgrade', 'head']
     environment: &app_environment
-      IS_DEVELOPMENT: "false"
-      DEBUG: "false"
-      DEBUGPY: "false"
+      IS_DEVELOPMENT: 'false'
+      DEBUG: 'false'
+      DEBUGPY: 'false'
       API_KEY: ${API_KEY:?API_KEY is required}
       CORS_ORIGINS: ${CORS_ORIGINS:-tauri://localhost,http://tauri.localhost}
       EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
@@ -57,7 +57,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-memoryrag}
       OLLAMA_HOST: ${OLLAMA_HOST:-host.docker.internal}
-      OLLAMA_PORT: 11434
+      OLLAMA_PORT: 11435
       OLLAMA_MODEL_OCR: ${OLLAMA_MODEL_OCR:-glm-ocr:latest}
       OLLAMA_MODEL_FORMAT: ${OLLAMA_MODEL_FORMAT:-qwen3.5:9b}
       OLLAMA_MODEL_TRANSLATION: ${OLLAMA_MODEL_TRANSLATION:-qwen3.5:27b}
@@ -70,7 +70,7 @@ services:
       UPLOAD_PATH: /app/storage/uploads
       TEMP_PATH: /app/temp_storage
       TEMP_OCR_PATH: /app/temp_storage/ocr
-      CELERY_TASK_ALWAYS_EAGER: "false"
+      CELERY_TASK_ALWAYS_EAGER: 'false'
     volumes:
       - brain_data:/app/brain
       - storage_data:/app/storage
@@ -78,33 +78,33 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    restart: "no"
+    restart: 'no'
 
   ollama-check:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["python3.12", "-m", "app.services.ai.ollama_preflight"]
+    command: ['python3.12', '-m', 'app.services.ai.ollama_preflight']
     environment: *app_environment
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - 'host.docker.internal:host-gateway'
     depends_on:
       postgres:
         condition: service_healthy
-    restart: "no"
+    restart: 'no'
 
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ['uvicorn', 'main:app', '--host', '0.0.0.0', '--port', '8000']
     expose:
-      - "8000"
+      - '8000'
     ports:
-      - "${RAG_HTTP_PORT:-18080}:8000"
+      - '${RAG_HTTP_PORT:-18080}:8000'
     environment: *app_environment
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - 'host.docker.internal:host-gateway'
     volumes:
       - brain_data:/app/brain
       - storage_data:/app/storage
@@ -122,7 +122,13 @@ services:
       ollama-check:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python3.12", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      test:
+        [
+          'CMD',
+          'python3.12',
+          '-c',
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -137,10 +143,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["celery", "-A", "workers.celery_app", "worker", "--loglevel=info", "--pool=threads"]
+    command:
+      [
+        'celery',
+        '-A',
+        'workers.celery_app',
+        'worker',
+        '--loglevel=info',
+        '--pool=threads',
+      ]
     environment: *app_environment
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - 'host.docker.internal:host-gateway'
     volumes:
       - brain_data:/app/brain
       - storage_data:/app/storage
