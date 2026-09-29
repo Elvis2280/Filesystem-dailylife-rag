@@ -34,7 +34,28 @@ not add host bind mounts for `./app`, `./workers`, `./main.py`, `./alembic.ini`,
 `./alembic`, or the Nginx configuration. Those mounts are intended for local
 development and can cause Coolify's file-to-directory mount error.
 
-## Configure host Ollama
+## Configure Ollama access
+
+For the HTTPS endpoint, add this variable in Coolify before deploying:
+
+```env
+OLLAMA_BASE_URL=https://ollama.tail1e26db.ts.net
+```
+
+The API and worker containers must resolve the hostname and trust its TLS
+certificate. Verify the Ollama tags endpoint from both containers:
+
+```bash
+docker compose exec api python3.12 -c \
+  'import urllib.request; print(urllib.request.urlopen("https://ollama.tail1e26db.ts.net/api/tags", timeout=10).status)'
+docker compose exec worker python3.12 -c \
+  'from ollama import Client; print(len(Client(host="https://ollama.tail1e26db.ts.net", timeout=10).list().models))'
+```
+
+When `OLLAMA_BASE_URL` is unset, the app falls back to the legacy HTTP
+`OLLAMA_HOST` and `OLLAMA_PORT` settings.
+
+### Legacy direct HTTP fallback
 
 Ollama normally listens only on `127.0.0.1`. Configure the Linux service to
 listen on the Docker-reachable interface:
@@ -64,9 +85,10 @@ and deny public internet access with the host firewall. Do not expose Ollama as
 a Coolify public domain. The Compose stack maps
 `host.docker.internal` to the Docker host using `host-gateway`.
 
-If the host uses a nonstandard address or Docker gateway, set `OLLAMA_HOST` in
-Coolify to the reachable host name or IP. Do not use `localhost` or
-`127.0.0.1`, because those refer to the API/worker container itself.
+If using the HTTP fallback and the host uses a nonstandard address or Docker
+gateway, set `OLLAMA_HOST` and `OLLAMA_PORT` in Coolify to the reachable host
+name/IP and port. Do not use `localhost` or `127.0.0.1`, because those refer to
+the API/worker container itself. The Compose default port is `11435`.
 
 Before deploying, verify the endpoint from a container on the server:
 
@@ -100,15 +122,18 @@ OLLAMA_MODEL_EMBEDDING=bge-m3
 OLLAMA_MODEL_AGENT=qwen3.5:9b
 OLLAMA_TIMEOUT=600
 EMBEDDING_DEVICE=cpu
-# Optional when the host Ollama is not reachable through host.docker.internal
+# Use the HTTPS Ollama endpoint:
+OLLAMA_BASE_URL=https://ollama.tail1e26db.ts.net
+# Or unset OLLAMA_BASE_URL and use the HTTP fallback:
 # OLLAMA_HOST=host.docker.internal
-# OLLAMA_PORT=11434
+# OLLAMA_PORT=11435
 ```
 
 Coolify should generate and store `API_KEY` and `POSTGRES_PASSWORD` as secrets.
 The `OLLAMA_MODEL_*` values must exactly match the model names shown by
-`ollama list` on the server. The deployment runs `ollama-check`, which retries
-the host endpoint and blocks API/worker startup if a model is missing.
+`ollama list` on the Ollama server. The deployment runs `ollama-check`, which
+retries the configured endpoint and blocks API/worker startup if a model is
+missing.
 The API key is sent as `X-API-Key` on REST requests. For the document status
 WebSocket, send the key as `X-API-Key` when supported by the client or as the
 query parameter `api_key`:
@@ -126,7 +151,7 @@ Startup is ordered as follows:
 
 1. PostgreSQL, Redis, and Qdrant become healthy.
 2. `migrate` runs `alembic upgrade head` from the image contents.
-3. `ollama-check` retries the host Ollama endpoint and validates all configured
+3. `ollama-check` retries the configured Ollama endpoint and validates all configured
    model names.
 4. The API and worker start.
 
@@ -176,7 +201,7 @@ different origin, add that exact origin to `CORS_ORIGINS` and redeploy.
 - Compose configuration has no unset-variable warnings, GPU reservations, or
   repository bind mounts.
 - `migrate` completes successfully.
-- `ollama-check` completes and confirms the configured host Ollama models.
+- `ollama-check` completes and confirms the configured Ollama models.
 - `/health` returns `200` without authentication.
 - Protected REST requests return `401` without a valid API key and succeed with
   the configured key.

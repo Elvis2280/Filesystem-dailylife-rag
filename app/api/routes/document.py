@@ -122,13 +122,18 @@ async def get_document_status(
             detail="document_id must be a valid UUID",
         )
 
-    query_result = await db.execute(select(Document).where(Document.id == document_id))
-    document = query_result.scalar_one_or_none()
-    if not document:
+    query_result = await db.execute(
+        select(Document, WorkspaceModel.name)
+        .join(WorkspaceModel, WorkspaceModel.id == Document.workspace_id)
+        .where(Document.id == document_id)
+    )
+    document_row = query_result.one_or_none()
+    if document_row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Document with ID {document_id} not found in database.",
         )
+    document, workspace_name = document_row
 
     redis_async = await get_async_redis_client()
     task_id = await redis_async.get(f"document_task:{document_id}")
@@ -177,6 +182,8 @@ async def get_document_status(
 
     return DocumentStatusResponse(
         document_id=document_id,
+        original_filename=document.original_filename,
+        workspace_name=workspace_name,
         task_id=task_id,
         status=task_state,
         document_record_status=document.status,

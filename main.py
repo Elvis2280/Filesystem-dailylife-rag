@@ -83,9 +83,7 @@ async def lifespan(app: FastAPI):
     ollama = OllamaClient()
     health_resp = await ollama.health_check()
     if health_resp.is_reachable:
-        logger.info(
-            "Ollama: connected at %s:%d", settings.OLLAMA_HOST, settings.OLLAMA_PORT
-        )
+        logger.info("Ollama: connected at %s", settings.OLLAMA_URL)
         # OCR Model Check
         if settings.OLLAMA_MODEL_OCR in health_resp.available_models:
             logger.info(
@@ -141,9 +139,8 @@ async def lifespan(app: FastAPI):
             )
     else:
         logger.warning(
-            "Ollama: NOT reachable at %s:%d. OCR and LLM features will be unavailable.",
-            settings.OLLAMA_HOST,
-            settings.OLLAMA_PORT,
+            "Ollama: NOT reachable at %s. OCR and LLM features will be unavailable.",
+            settings.OLLAMA_URL,
         )
 
     # Fail fast if any critical dependency is missing

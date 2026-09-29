@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 
 import fitz
+from sqlalchemy.orm import Session
 
 from app.core.constant import (
     ALLOWED_IMAGE_EXTENSIONS,
@@ -13,6 +14,7 @@ from app.core.database import get_sync_db
 from app.core.redis_client import redis_client
 from app.models.document import Document
 from app.models.document_history import DocumentHistoryModel
+from app.models.workspace import WorkspaceModel
 from app.services.format.format import format_all_markdown
 from app.services.ocr.file_ocr_llm import extract_image_text
 from app.services.storage.document_sync import (
@@ -40,12 +42,14 @@ def _count_pdf_pages(path: str) -> int:
 def _publish_status(
     document_id: str,
     stage: FilePipelineStage,
+    original_filename: str,
+    workspace_name: str,
     message: str | None = None,
     page_number: int | None = None,
     total_pages: int | None = None,
     status: str = "PROGRESS",
-    db_session=None,
-):
+    db_session: Session | None = None,
+) -> None:
     payload = {
         "status": status,
         "step": stage.step_number,
@@ -53,6 +57,8 @@ def _publish_status(
         "stage": stage.value,
         "message": message or stage.message,
         "document_id": document_id,
+        "original_filename": original_filename,
+        "workspace_name": workspace_name,
         "page_number": page_number,
         "total_pages": total_pages,
         "timestamp": datetime.now().isoformat(),
@@ -86,8 +92,8 @@ def _publish_status(
 def _set_status(
     document: Document,
     file_status: FileStatus,
-    db_session,
-):
+    db_session: Session,
+) -> None:
     document.status = file_status.value
     db_session.commit()
 
@@ -108,12 +114,47 @@ def _dispatch_save_data_task(document_id: str) -> None:
 def process_file_upload(self, document_id: str) -> None:
     db_session = None
     document = None
+    original_filename = ""
+    workspace_name = ""
     try:
         with get_sync_db() as db_session:
             document = db_session.query(Document).filter_by(id=document_id).first()
             if not document:
                 raise ValueError(
                     f"Document with ID {document_id} not found in database."
+                )
+
+            original_filename = document.original_filename
+            workspace = (
+                db_session.query(WorkspaceModel)
+                .filter_by(id=document.workspace_id)
+                .first()
+            )
+            if workspace is None:
+                raise ValueError(
+                    f"Workspace with ID {document.workspace_id} not found in database."
+                )
+            workspace_name = workspace.name
+
+            def publish_status(
+                status_document_id: str,
+                stage: FilePipelineStage,
+                message: str | None = None,
+                page_number: int | None = None,
+                total_pages: int | None = None,
+                status: str = "PROGRESS",
+                db_session: Session | None = None,
+            ) -> None:
+                _publish_status(
+                    status_document_id,
+                    stage,
+                    original_filename=original_filename,
+                    workspace_name=workspace_name,
+                    message=message,
+                    page_number=page_number,
+                    total_pages=total_pages,
+                    status=status,
+                    db_session=db_session,
                 )
 
             ext = (
@@ -127,7 +168,7 @@ def process_file_upload(self, document_id: str) -> None:
             is_pdf = _is_pdf(document.mime_type)
 
             _set_status(document, FileStatus.FILE_UPLOADED, db_session)
-            _publish_status(
+            publish_status(
                 document_id,
                 FilePipelineStage.PENDING,
                 message="File uploaded, starting processing...",
@@ -137,7 +178,7 @@ def process_file_upload(self, document_id: str) -> None:
 
             if not is_pdf and ext not in ALLOWED_IMAGE_EXTENSIONS:
                 _set_status(document, FileStatus.FILE_CONVERSION_STARTED, db_session)
-                _publish_status(
+                publish_status(
                     document_id,
                     FilePipelineStage.PDF_CONVERSION,
                     status=FileStatus.FILE_CONVERSION_STARTED.value,
@@ -164,7 +205,7 @@ def process_file_upload(self, document_id: str) -> None:
                     )
 
                 _set_status(document, FileStatus.FILE_CONVERSION_FINISHED, db_session)
-                _publish_status(
+                publish_status(
                     document_id,
                     FilePipelineStage.PDF_CONVERSION,
                     message="File conversion finished.",
@@ -173,7 +214,7 @@ def process_file_upload(self, document_id: str) -> None:
                 )
 
             if ext == ".pdf" or is_pdf:
-                _publish_status(
+                publish_status(
                     document_id,
                     FilePipelineStage.IMAGE_CONVERSION,
                     status=FileStatus.FILE_CONVERSION_FINISHED.value,
@@ -212,7 +253,7 @@ def process_file_upload(self, document_id: str) -> None:
                 total_pages = len(images_path)
 
                 _set_status(document, FileStatus.OCR_STARTED, db_session)
-                _publish_status(
+                publish_status(
                     document_id,
                     FilePipelineStage.OCR_PROCESSING,
                     message=f"Starting OCR on {total_pages} pages...",
@@ -226,7 +267,7 @@ def process_file_upload(self, document_id: str) -> None:
                 )
 
                 for idx, image_path in enumerate(images_path):
-                    _publish_status(
+                    publish_status(
                         document_id,
                         FilePipelineStage.OCR_PROCESSING,
                         message=f"Processing page {idx + 1} of {total_pages}...",
@@ -261,7 +302,7 @@ def process_file_upload(self, document_id: str) -> None:
                                 idx + 1,
                                 document_id,
                             )
-                            _publish_status(
+                            publish_status(
                                 document_id,
                                 FilePipelineStage.OCR_PROCESSING,
                                 message=(
@@ -295,7 +336,7 @@ def process_file_upload(self, document_id: str) -> None:
                         ) from e
 
                 _set_status(document, FileStatus.OCR_FINISHED, db_session)
-                _publish_status(
+                publish_status(
                     document_id,
                     FilePipelineStage.OCR_PROCESSING,
                     message=f"OCR finished! {total_pages} pages processed.",
@@ -307,7 +348,7 @@ def process_file_upload(self, document_id: str) -> None:
             _set_status(
                 document, FileStatus.TRANSLATION_AND_FORMATTING_STARTED, db_session
             )
-            _publish_status(
+            publish_status(
                 document_id,
                 FilePipelineStage.TRANSLATION,
                 message="Starting translation and formatting...",
@@ -331,7 +372,7 @@ def process_file_upload(self, document_id: str) -> None:
                     FileStatus.TRANSLATION_AND_FORMATTING_FINISHED,
                     db_session,
                 )
-                _publish_status(
+                publish_status(
                     document_id,
                     FilePipelineStage.TRANSLATION,
                     message="Translation and formatting finished.",
@@ -340,7 +381,7 @@ def process_file_upload(self, document_id: str) -> None:
                 )
 
                 _set_status(document, FileStatus.FILE_PROCESS_FINISHED, db_session)
-                _publish_status(
+                publish_status(
                     document_id,
                     FilePipelineStage.FILE_PROCESS_FINISHED,
                     message=(
@@ -367,7 +408,7 @@ def process_file_upload(self, document_id: str) -> None:
                     document_id,
                     format_error,
                 )
-                _publish_status(
+                publish_status(
                     document_id,
                     FilePipelineStage.FAILED,
                     message=(f"Translation/formatting failed: {format_error}"),
@@ -383,6 +424,8 @@ def process_file_upload(self, document_id: str) -> None:
         _publish_status(
             document_id,
             FilePipelineStage.FAILED,
+            original_filename=original_filename,
+            workspace_name=workspace_name,
             message=str(e),
             status=FileStatus.FAILED.value,
             db_session=db_session,

@@ -25,7 +25,7 @@ def required_models() -> set[str]:
 
 
 async def check_ollama() -> None:
-    """Wait for host Ollama and fail when a configured model is unavailable."""
+    """Wait for the configured Ollama endpoint and validate required models."""
     client = OllamaClient(timeout=10)
 
     for attempt in range(1, PREFLIGHT_ATTEMPTS + 1):
@@ -42,28 +42,24 @@ async def check_ollama() -> None:
                 )
 
             logger.info(
-                "Host Ollama is ready at %s:%s with %d required model(s)",
-                settings.OLLAMA_HOST,
-                settings.OLLAMA_PORT,
+                "Ollama is ready at %s with %d required model(s)",
+                settings.OLLAMA_URL,
                 len(required_models()),
             )
             return
 
         if attempt < PREFLIGHT_ATTEMPTS:
             logger.warning(
-                "Host Ollama is not reachable at %s:%s (attempt %d/%d); retrying",
-                settings.OLLAMA_HOST,
-                settings.OLLAMA_PORT,
+                "Ollama is not reachable at %s (attempt %d/%d); retrying",
+                settings.OLLAMA_URL,
                 attempt,
                 PREFLIGHT_ATTEMPTS,
             )
             await asyncio.sleep(PREFLIGHT_DELAY_SECONDS)
 
     raise RuntimeError(
-        f"Host Ollama is not reachable at "
-        f"{settings.OLLAMA_HOST}:{settings.OLLAMA_PORT} after "
-        f"{PREFLIGHT_ATTEMPTS} attempts. Ensure Ollama listens on a Docker-"
-        "reachable address and that host.docker.internal resolves correctly."
+        f"Ollama is not reachable at {settings.OLLAMA_URL} after "
+        f"{PREFLIGHT_ATTEMPTS} attempts. Check the URL and container network access."
     )
 
 

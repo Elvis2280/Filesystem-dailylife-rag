@@ -27,7 +27,7 @@ class OllamaClient:
         host: Ollama server hostname (default: from settings).
         port: Ollama server port (default: from settings).
         timeout: HTTP request timeout in seconds (default: from settings).
-        base_url: Full base URL constructed from host:port.
+        base_url: Full Ollama base URL, including its scheme.
     """
 
     def __init__(
@@ -47,7 +47,10 @@ class OllamaClient:
         self.host = host or settings.OLLAMA_HOST
         self.port = port or settings.OLLAMA_PORT
         self.timeout = timeout or settings.OLLAMA_TIMEOUT
-        self.base_url = f"http://{self.host}:{self.port}"
+        if host is not None or port is not None:
+            self.base_url = f"http://{self.host}:{self.port}"
+        else:
+            self.base_url = settings.OLLAMA_URL
 
     async def health_check(self) -> OllamaStatusResponse:
         """Check if Ollama server is reachable and list available models.

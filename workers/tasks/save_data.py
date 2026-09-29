@@ -12,6 +12,7 @@ from app.core.database import get_sync_db
 from app.core.redis_client import redis_client
 from app.models.document import Document
 from app.models.document_history import DocumentHistoryModel
+from app.models.workspace import WorkspaceModel
 from app.services.format.cleaner_llm import clean_text
 from app.services.rag.embedding import embedding
 from app.services.rag.qdrant_client import upsert_embeddings
@@ -23,12 +24,14 @@ logger = logging.getLogger("memory_rag.save_data")
 def _publish_status(
     document_id: str,
     stage: FilePipelineStage,
+    original_filename: str,
+    workspace_name: str,
     message: str | None = None,
     page_number: int | None = None,
     total_pages: int | None = None,
     status: str = "PROGRESS",
     db_session: Session | None = None,
-):
+) -> None:
     payload = {
         "status": status,
         "step": stage.step_number,
@@ -36,6 +39,8 @@ def _publish_status(
         "stage": stage.value,
         "message": message or stage.message,
         "document_id": document_id,
+        "original_filename": original_filename,
+        "workspace_name": workspace_name,
         "page_number": page_number,
         "total_pages": total_pages,
         "timestamp": datetime.now().isoformat(),
@@ -77,7 +82,7 @@ def _set_status(
     document: Document,
     file_status: FileStatus,
     db_session: Session,
-):
+) -> None:
     document.status = file_status.value
     db_session.commit()
 
@@ -127,11 +132,46 @@ def process_save_data(self, document_id: str) -> None:
     disk and surfaced to the next stage (embedding + Qdrant indexing).
     """
     db_session: Session | None = None
+    original_filename = ""
+    workspace_name = ""
     try:
         with get_sync_db() as db_session:
             document = db_session.query(Document).filter_by(id=document_id).first()
             if not document:
                 raise ValueError(f"No document with ID {document_id}")
+
+            original_filename = document.original_filename
+            workspace = (
+                db_session.query(WorkspaceModel)
+                .filter_by(id=document.workspace_id)
+                .first()
+            )
+            if workspace is None:
+                raise ValueError(
+                    f"Workspace with ID {document.workspace_id} not found in database."
+                )
+            workspace_name = workspace.name
+
+            def publish_status(
+                status_document_id: str,
+                stage: FilePipelineStage,
+                message: str | None = None,
+                page_number: int | None = None,
+                total_pages: int | None = None,
+                status: str = "PROGRESS",
+                db_session: Session | None = None,
+            ) -> None:
+                _publish_status(
+                    status_document_id,
+                    stage,
+                    original_filename=original_filename,
+                    workspace_name=workspace_name,
+                    message=message,
+                    page_number=page_number,
+                    total_pages=total_pages,
+                    status=status,
+                    db_session=db_session,
+                )
 
             page_count = document.page_count
             if not page_count or page_count < 1:
@@ -140,7 +180,7 @@ def process_save_data(self, document_id: str) -> None:
                     "file_pipeline must finish before indexing."
                 )
 
-            _publish_status(
+            publish_status(
                 document_id,
                 FilePipelineStage.VERIFY_FILES,
                 message=f"Verifying required files for {page_count} pages...",
@@ -151,7 +191,7 @@ def process_save_data(self, document_id: str) -> None:
 
             workspace_id = str(document.workspace_id)
             for page in range(1, page_count + 1):
-                _publish_status(
+                publish_status(
                     document_id,
                     FilePipelineStage.COLLECTING_DATA,
                     message=f"Collecting data on page {page} of {page_count}...",
@@ -168,7 +208,7 @@ def process_save_data(self, document_id: str) -> None:
                 english_markdown = _read_text(english_path, f"English page {page}")
                 japanese_markdown = _read_text(japanese_path, f"Japanese page {page}")
 
-                _publish_status(
+                publish_status(
                     document_id,
                     FilePipelineStage.PREPARING_DATA,
                     message=f"Preparing data on page {page} of {page_count}...",
@@ -241,7 +281,7 @@ def process_save_data(self, document_id: str) -> None:
                     japanese_text=japanese_markdown,
                 )
 
-            _publish_status(
+            publish_status(
                 document_id,
                 FilePipelineStage.SAVING_DATA,
                 message="Saving data to vector store...",
@@ -250,7 +290,7 @@ def process_save_data(self, document_id: str) -> None:
             )
 
             _set_status(document, FileStatus.COMPLETED, db_session)
-            _publish_status(
+            publish_status(
                 document_id,
                 FilePipelineStage.COMPLETED,
                 message=f"Vector indexing finished for {page_count} pages.",
@@ -263,6 +303,8 @@ def process_save_data(self, document_id: str) -> None:
         _publish_status(
             document_id,
             FilePipelineStage.FAILED,
+            original_filename=original_filename,
+            workspace_name=workspace_name,
             message=str(e),
             status=FileStatus.FAILED.value,
             db_session=db_session,

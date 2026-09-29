@@ -34,6 +34,8 @@ class FileConversionResponse(BaseModel):
 
 class DocumentStatusResponse(BaseModel):
     document_id: str = Field(..., description="UUID of the document")
+    original_filename: str = Field(..., description="Original uploaded filename")
+    workspace_name: str = Field(..., description="Name of the document workspace")
     task_id: str = Field(..., description="Celery task ID for status tracking")
     status: str = Field(
         ...,

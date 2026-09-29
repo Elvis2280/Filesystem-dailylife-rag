@@ -41,9 +41,20 @@ async def _get_current_state(document_id: str) -> dict | None:
 
     from app.models.document import Document
     from app.models.document_history import DocumentHistoryModel
+    from app.models.workspace import WorkspaceModel
 
     doc_uuid = UUID(document_id)
     async with async_session() as db:
+        document_result = await db.execute(
+            select(Document, WorkspaceModel.name)
+            .join(WorkspaceModel, WorkspaceModel.id == Document.workspace_id)
+            .where(Document.id == doc_uuid)
+        )
+        document_row = document_result.one_or_none()
+        if document_row is None:
+            return None
+        document, workspace_name = document_row
+
         history_result = await db.execute(
             select(DocumentHistoryModel)
             .where(DocumentHistoryModel.document_id == doc_uuid)
@@ -61,6 +72,8 @@ async def _get_current_state(document_id: str) -> dict | None:
                 "stepTotal": PIPELINE_STEP_TOTAL,
                 "message": history.message,
                 "document_id": document_id,
+                "original_filename": document.original_filename,
+                "workspace_name": workspace_name,
                 "page_number": history.page_number,
                 "total_pages": history.total_pages,
                 "timestamp": (
@@ -69,23 +82,21 @@ async def _get_current_state(document_id: str) -> dict | None:
             }
 
         # No history yet — fall back to document's current status
-        doc_result = await db.execute(select(Document).where(Document.id == doc_uuid))
-        doc = doc_result.scalar_one_or_none()
-
-        if doc is None:
-            return None
-
         return {
             "type": "current_state",
-            "status": doc.status or "",
+            "status": document.status or "",
             "stage": None,
             "step": None,
             "stepTotal": PIPELINE_STEP_TOTAL,
             "message": "Pending",
             "document_id": document_id,
+            "original_filename": document.original_filename,
+            "workspace_name": workspace_name,
             "page_number": None,
-            "total_pages": doc.page_count,
-            "timestamp": (doc.created_at.isoformat() if doc.created_at else None),
+            "total_pages": document.page_count,
+            "timestamp": (
+                document.created_at.isoformat() if document.created_at else None
+            ),
         }
 
 

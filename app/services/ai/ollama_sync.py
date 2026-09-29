@@ -35,9 +35,12 @@ class OllamaSyncClient:
             host: Ollama server hostname. Falls back to settings.OLLAMA_HOST.
             port: Ollama server port. Falls back to settings.OLLAMA_PORT.
         """
-        host = host or settings.OLLAMA_HOST
-        port = port or settings.OLLAMA_PORT
-        base_url = f"http://{host}:{port}"
+        if host is not None or port is not None:
+            host = host or settings.OLLAMA_HOST
+            port = port or settings.OLLAMA_PORT
+            base_url = f"http://{host}:{port}"
+        else:
+            base_url = settings.OLLAMA_URL
         self._client = Client(
             host=base_url,
             timeout=settings.OLLAMA_TIMEOUT,

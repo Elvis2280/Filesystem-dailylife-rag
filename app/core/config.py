@@ -1,6 +1,7 @@
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -80,6 +81,7 @@ class Settings(BaseSettings):
     NGINX_PORT: int = 80
 
     # Ollama
+    OLLAMA_BASE_URL: str | None = None
     OLLAMA_HOST: str = "localhost"
     OLLAMA_PORT: int = 11434
     OLLAMA_MODEL_OCR: str = "glm-ocr:latest"
@@ -89,6 +91,35 @@ class Settings(BaseSettings):
     OLLAMA_MODEL_EMBEDDING: str = "bge-m3:latest"
     OLLAMA_MODEL_AGENT: str = "qwen3.5:9b"
     OLLAMA_TIMEOUT: int = 600
+
+    @field_validator("OLLAMA_BASE_URL", mode="before")
+    @classmethod
+    def _normalize_ollama_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        base_url = str(value).strip().rstrip("/")
+        if not base_url:
+            return None
+
+        parsed_url = urlsplit(base_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+            raise ValueError(
+                "OLLAMA_BASE_URL must be an absolute http:// or https:// URL"
+            )
+        try:
+            parsed_url.port
+        except ValueError as exc:
+            raise ValueError("OLLAMA_BASE_URL contains an invalid port") from exc
+
+        return base_url
+
+    @property
+    def OLLAMA_URL(self) -> str:
+        """Return the configured Ollama URL or the legacy HTTP host and port."""
+        if self.OLLAMA_BASE_URL:
+            return self.OLLAMA_BASE_URL
+        return f"http://{self.OLLAMA_HOST}:{self.OLLAMA_PORT}"
 
     # Brain Storage
     BRAIN_PATH: str = "./brain"

@@ -223,9 +223,13 @@ API available at `http://localhost/` (via nginx on port 80).
 For the remote Tauri Dev Testing environment, deploy the dedicated
 [`docker-compose.coolify.yml`](docker-compose.coolify.yml) stack and follow
 [`COOLIFY_DEV_TESTING.md`](COOLIFY_DEV_TESTING.md). It uses Coolify HTTPS for
-the API, internal service networking, named persistent volumes, host Ollama,
+the API, internal service networking, named persistent volumes, remote Ollama,
 automatic migrations, and model validation. The local development Compose file
 remains unchanged.
+
+Set `OLLAMA_BASE_URL` in the Coolify environment to the full Ollama URL, for
+example `https://ollama.tail1e26db.ts.net`. When it is unset, the app uses
+`http://OLLAMA_HOST:OLLAMA_PORT`.
 
 **Differences from dev:**
 

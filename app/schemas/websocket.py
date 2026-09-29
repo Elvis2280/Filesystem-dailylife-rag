@@ -24,6 +24,8 @@ class WebSocketProgressMessage(BaseModel):
     stage: str = Field(..., description="Stage name matching FilePipelineStage value")
     message: str = Field(..., description="Human-readable status message")
     document_id: str = Field(..., description="Document UUID")
+    original_filename: str = Field(..., description="Original uploaded filename")
+    workspace_name: str = Field(..., description="Name of the document workspace")
     page_number: int | None = Field(
         default=None, description="1-indexed current page (OCR stage)"
     )
