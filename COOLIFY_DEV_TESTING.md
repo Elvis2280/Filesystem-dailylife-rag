@@ -32,7 +32,11 @@ Coolify must build the application image from the repository. The image already
 contains the Python source, `main.py`, `alembic.ini`, and migration package. Do
 not add host bind mounts for `./app`, `./workers`, `./main.py`, `./alembic.ini`,
 `./alembic`, or the Nginx configuration. Those mounts are intended for local
-development and can cause Coolify's file-to-directory mount error.
+development and can cause Coolify's file-to-directory mount error. Garage's
+configuration is copied into its image from `docker/garage/garage.toml`; do not
+add a runtime bind mount for `/etc/garage.toml`. If Garage logs `Is a directory`
+while loading `/etc/garage.toml`, confirm the deployed Compose definition uses
+the Garage build and does not contain the old config bind mount, then redeploy.
 
 ## Configure Ollama access
 
@@ -177,6 +181,69 @@ publish host ports through this Compose stack. Do not configure router port
 forwarding for `18080`; restrict any host or upstream firewall rule to the
 trusted LAN.
 
+## Fresh start while keeping the Coolify resource
+
+Use this only when you intend to discard the server's current application data.
+Keep the existing Coolify Compose resource and its environment variables,
+network destination, and `RAG_HTTP_PORT` value. This keeps the API on the same
+LAN address and port. Do not delete and recreate the Coolify resource.
+
+1. Save the resource's environment settings and network destination, then stop
+   the resource so its services cannot write while being backed up.
+2. On the Coolify server, list volumes for this Compose project and inspect
+   their `com.docker.compose.project` and `com.docker.compose.volume` labels.
+   Select only its six app volumes: `postgres_data`, `qdrant_data`,
+   `garage_meta`, `garage_data`, `temp_data`, and `model_cache`. Coolify may
+   prefix or normalize their actual names. Do not select volumes belonging to
+   another resource or host Ollama. The commands below use
+   `<resource-uuid>` and `<volume-name>` as placeholders; replace them with
+   the verified values before running:
+
+   ```bash
+   docker volume ls \
+     --filter label=com.docker.compose.project=<resource-uuid> \
+     --format '{{.Name}}'
+   docker volume inspect <volume-name> \
+     --format '{{.Name}} {{index .Labels "com.docker.compose.project"}} {{index .Labels "com.docker.compose.volume"}}'
+   ```
+
+3. Archive each selected volume to a backup directory outside Docker volumes.
+   Run this once per verified volume, replacing both occurrences of
+   `<volume-name>`:
+
+   ```bash
+   mkdir -p /srv/backups/memory-rag-fresh-reset
+   docker run --rm \
+     -v <volume-name>:/source:ro \
+     -v /srv/backups/memory-rag-fresh-reset:/backup \
+     busybox tar -czf /backup/<volume-name>.tar.gz -C /source .
+   tar -tzf /srv/backups/memory-rag-fresh-reset/<volume-name>.tar.gz >/dev/null
+   ```
+
+   Keep these backups until the new deployment passes the checks below.
+4. Remove the stopped containers for this Compose project, then remove only
+   the six verified volume names. For the containers, use:
+
+   ```bash
+   docker ps -aq \
+     --filter label=com.docker.compose.project=<resource-uuid> \
+     | xargs -r docker rm -f
+   docker volume rm <postgres-volume> <qdrant-volume> <garage-meta-volume> \
+     <garage-data-volume> <temp-volume> <model-cache-volume>
+   ```
+
+   Do not use `docker compose down --volumes` or `docker volume prune`.
+   Removing these six volumes clears PostgreSQL, Qdrant, Garage, temporary
+   files, and the app's model cache.
+5. In Coolify, deploy the `develop` branch on the same resource. Coolify can
+   recreate the project's Docker network from the saved network settings.
+   Host Ollama models are outside this Compose stack and remain in place.
+
+After redeploy, confirm Garage and its bucket are ready, `migrate` and
+`ollama-check` complete successfully, and `/health` returns `200` from both the
+server and a LAN client. Upload and process a document, then verify search and
+chat before considering the fresh installation complete.
+
 ## Tauri configuration
 
 Verify the API from the server after deployment:
@@ -205,7 +272,7 @@ different origin, add that exact origin to `CORS_ORIGINS` and redeploy.
 
 - Coolify deployment uses `docker-compose.coolify.yml` from `develop`.
 - Compose configuration has no unset-variable warnings, GPU reservations, or
-  repository bind mounts.
+  application source bind mounts; Garage uses its image-baked configuration.
 - `migrate` completes successfully.
 - `ollama-check` completes and confirms the configured Ollama models.
 - `/health` returns `200` without authentication.
