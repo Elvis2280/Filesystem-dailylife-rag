@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     # Qdrant
     QDRANT_HOST: str = "qdrant"
     QDRANT_PORT: int = 6333
+    QDRANT_COLLECTION: str = "documents"
+    QDRANT_HYBRID_COLLECTION: str = "documents_v2"
+    QDRANT_USE_HYBRID: bool = False
+    QDRANT_DUAL_WRITE_HYBRID: bool = True
 
     # Garage / S3-compatible object storage
     GARAGE_HOST: str = "garage"

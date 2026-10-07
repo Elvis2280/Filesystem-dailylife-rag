@@ -6,6 +6,8 @@ as parameters — callers are responsible for prompt engineering and model selec
 For synchronous calls in Celery workers, see app.services.ai.ollama_sync.
 """
 
+from typing import Any
+
 import httpx
 
 from app.core.config import settings
@@ -82,6 +84,7 @@ class OllamaClient:
         num_predict: int = 2048,
         temperature: float = 0,
         think: bool = False,
+        response_format: str | dict[str, Any] | None = None,
     ) -> str:
         """Send an async chat request to Ollama with model, prompt, and optional image.
 
@@ -106,21 +109,25 @@ class OllamaClient:
         if image_base64 is not None:
             message["images"] = [image_base64]
 
+        request_data: dict[str, Any] = {
+            "model": model,
+            "stream": False,
+            "messages": [message],
+            "think": False,
+            "options": {
+                "num_ctx": num_ctx,
+                "num_predict": num_predict,
+                "temperature": temperature,
+            },
+        }
+        if response_format is not None:
+            request_data["format"] = response_format
+
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.post(
                     f"{self.base_url}/api/chat",
-                    json={
-                        "model": model,
-                        "stream": False,
-                        "messages": [message],
-                        "think": False,
-                        "options": {
-                            "num_ctx": num_ctx,
-                            "num_predict": num_predict,
-                            "temperature": temperature,
-                        },
-                    },
+                    json=request_data,
                 )
                 response.raise_for_status()
                 return response.json().get("message", {}).get("content", "")

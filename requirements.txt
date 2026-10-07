@@ -21,7 +21,7 @@ pdfplumber>=0.11.0
 Pillow>=10.0.0
 
 # Vector DB
-qdrant-client>=1.13.0
+qdrant-client==1.19.1
 
 # Object Storage
 boto3>=1.35.0

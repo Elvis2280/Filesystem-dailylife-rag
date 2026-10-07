@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18.1
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
@@ -71,6 +71,10 @@ services:
       REDIS_PORT: 6379
       QDRANT_HOST: qdrant
       QDRANT_PORT: 6333
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-documents}
+      QDRANT_HYBRID_COLLECTION: ${QDRANT_HYBRID_COLLECTION:-documents_v2}
+      QDRANT_USE_HYBRID: ${QDRANT_USE_HYBRID:-false}
+      QDRANT_DUAL_WRITE_HYBRID: ${QDRANT_DUAL_WRITE_HYBRID:-true}
       GARAGE_HOST: garage
       GARAGE_PORT: 3900
       OBJECT_STORAGE_ENDPOINT: http://garage:3900

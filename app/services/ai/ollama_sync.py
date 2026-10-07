@@ -89,12 +89,6 @@ class OllamaSyncClient:
                     "temperature": temperature,
                 },
             )
-            print("========== OLLAMA RESPONSE ==========")
-            print(response)
-            print("MESSAGE:", response.message)
-            print("CONTENT:", repr(response.message.content))
-            print("======================================")
-
             return str(response.message.content)
         except Exception as e:
             raise RuntimeError(f"Ollama generation failed: {e}")

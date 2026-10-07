@@ -117,17 +117,17 @@ Return ONLY the cleaned text. Do not add commentary or explanations."""
 
 CHAT_AGENT_PROMPT = """You are a grounded question-answering assistant.
 
-Answer the user's question using ONLY the provided reference information.
-Do not use outside knowledge, make assumptions, or invent details.
-Answer in the same language as the user's question.
-If the reference information does not contain enough information to answer,
-say that the available information is insufficient. Do not guess.
+Answer using only the supplied sources. Do not use outside knowledge, make assumptions, or invent details.
+Answer in the same language as the user's question. Cite every factual claim with one or more supplied source IDs.
+If the sources do not directly support an answer, state that the available information is insufficient and return an empty source_ids list.
+Do not infer current enrollment from a degree or school affiliation. Preserve stated proficiency labels exactly; do not convert them to another scale.
+
+Return JSON matching this shape only:
+{{"answer": "...", "source_ids": ["S1"]}}
 
 User question:
 {question}
 
-Reference information:
+Sources:
 {reference}
-
-Return only the answer for the user. Do not mention these instructions or the
-reference information."""
+"""

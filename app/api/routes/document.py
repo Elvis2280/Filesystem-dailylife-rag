@@ -31,6 +31,8 @@ from app.core.database import get_db
 from app.core.redis_client import get_async_redis_client
 from app.core.websocket_manager import manager
 from app.models.document import Document
+from app.models.document_split import DocumentSplitModel
+from app.models.translation import TranslationModel
 from app.models.workspace import WorkspaceModel
 from app.schemas.document import (
     DocumentStatusResponse,
@@ -46,6 +48,14 @@ from app.services.storage.document import (
 from app.services.storage.document_preview import (
     PdfPreviewNotFound,
     resolve_pdf_document,
+)
+from app.services.storage.image_preview import (
+    ImagePreviewNotFound,
+    resolve_split_image,
+)
+from app.services.storage.translation_preview import (
+    TranslationPreviewNotFound,
+    resolve_translation,
 )
 from app.services.storage.object_storage import (
     OBJECT_STREAM_CHUNK_SIZE,
@@ -129,27 +139,29 @@ def _parse_range_header(value: str | None, total_size: int) -> _ByteRange | None
     return _ByteRange(start=start, end=end)
 
 
-def _content_disposition(filename: str) -> str:
-    name = PurePath(filename).name or "document.pdf"
+def _content_disposition(filename: str, extension: str | None = ".pdf") -> str:
+    fallback_name = f"document{extension or ''}"
+    name = PurePath(filename).name or fallback_name
     name = name.replace("\r", "_").replace("\n", "_").replace('"', "_")
-    if not name.lower().endswith(".pdf"):
-        name = f"{PurePath(name).stem or 'document'}.pdf"
-    ascii_name = name.encode("ascii", "ignore").decode("ascii") or "document.pdf"
+    if extension and not name.lower().endswith(extension):
+        name = f"{PurePath(name).stem or PurePath(fallback_name).stem}{extension}"
+    ascii_name = name.encode("ascii", "ignore").decode("ascii") or fallback_name
     ascii_name = ascii_name.replace("\\", "_").replace('"', "_")
     encoded_name = quote(name, safe="")
     return f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded_name}"
 
 
 def _preview_headers(
-    document: Document,
+    filename: str,
     metadata: ObjectMetadata,
     content_length: int,
     byte_range: _ByteRange | None,
+    extension: str | None = ".pdf",
 ) -> dict[str, str]:
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(content_length),
-        "Content-Disposition": _content_disposition(document.original_filename),
+        "Content-Disposition": _content_disposition(filename, extension),
         "Cache-Control": "private, no-store",
         "X-Content-Type-Options": "nosniff",
     }
@@ -236,6 +248,122 @@ async def _prepare_pdf_preview(
             headers={"Content-Range": f"bytes */{metadata.size}"},
         ) from exc
     return pdf_document, metadata, byte_range
+
+
+async def _prepare_translation_preview(
+    translation_id: str,
+    range_header: str | None,
+    db: AsyncSession,
+) -> tuple[TranslationModel, ObjectMetadata, _ByteRange | None]:
+    if not _is_valid_uuid(translation_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="translation_id must be a valid UUID",
+        )
+
+    try:
+        translation = await resolve_translation(uuid.UUID(translation_id), db)
+    except TranslationPreviewNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Translation was not found",
+        ) from exc
+
+    try:
+        metadata = await asyncio.to_thread(head_object, translation.storage_key)
+    except (ObjectStorageError, ValueError) as exc:
+        logger.error(
+            "Markdown object unavailable translation_id=%s storage_key=%s",
+            translation.id,
+            translation.storage_key,
+            exc_info=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The Markdown object is temporarily unavailable",
+        ) from exc
+
+    if metadata.size != translation.size:
+        logger.error(
+            "Markdown metadata mismatch translation_id=%s storage_key=%s "
+            "db_size=%s object_size=%s",
+            translation.id,
+            translation.storage_key,
+            translation.size,
+            metadata.size,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The Markdown object metadata is inconsistent",
+        )
+
+    try:
+        byte_range = _parse_range_header(range_header, metadata.size)
+    except _InvalidByteRange as exc:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail="The requested byte range is not satisfiable",
+            headers={"Content-Range": f"bytes */{metadata.size}"},
+        ) from exc
+    return translation, metadata, byte_range
+
+
+async def _prepare_split_image_preview(
+    split_id: str,
+    range_header: str | None,
+    db: AsyncSession,
+) -> tuple[DocumentSplitModel, ObjectMetadata, _ByteRange | None]:
+    if not _is_valid_uuid(split_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="split_id must be a valid UUID",
+        )
+
+    try:
+        split = await resolve_split_image(uuid.UUID(split_id), db)
+    except ImagePreviewNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Split image was not found",
+        ) from exc
+
+    try:
+        metadata = await asyncio.to_thread(head_object, split.storage_key)
+    except (ObjectStorageError, ValueError) as exc:
+        logger.error(
+            "Split image object unavailable split_id=%s storage_key=%s",
+            split.id,
+            split.storage_key,
+            exc_info=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The split image is temporarily unavailable",
+        ) from exc
+
+    if metadata.size != split.size:
+        logger.error(
+            "Split image metadata mismatch split_id=%s storage_key=%s "
+            "db_size=%s object_size=%s",
+            split.id,
+            split.storage_key,
+            split.size,
+            metadata.size,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The split image metadata is inconsistent",
+        )
+
+    try:
+        byte_range = _parse_range_header(range_header, metadata.size)
+    except _InvalidByteRange as exc:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail="The requested byte range is not satisfiable",
+            headers={"Content-Range": f"bytes */{metadata.size}"},
+        ) from exc
+    return split, metadata, byte_range
 
 
 @router.post(
@@ -340,7 +468,12 @@ async def get_document_pdf(
         ) from exc
 
     content_length = byte_range.length if byte_range else metadata.size
-    headers = _preview_headers(pdf_document, metadata, content_length, byte_range)
+    headers = _preview_headers(
+        pdf_document.original_filename,
+        metadata,
+        content_length,
+        byte_range,
+    )
     return StreamingResponse(
         _stream_object(body),
         status_code=status.HTTP_206_PARTIAL_CONTENT
@@ -371,7 +504,176 @@ async def head_document_pdf(
         if byte_range
         else status.HTTP_200_OK,
         media_type="application/pdf",
-        headers=_preview_headers(pdf_document, metadata, content_length, byte_range),
+        headers=_preview_headers(
+            pdf_document.original_filename,
+            metadata,
+            content_length,
+            byte_range,
+        ),
+    )
+
+
+@router.get(
+    "/documents/{translation_id}/markdown",
+    response_class=StreamingResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def get_translation_markdown(
+    translation_id: str,
+    range_header: str | None = Header(default=None, alias="Range"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stream one translated Markdown page from Garage."""
+
+    translation, metadata, byte_range = await _prepare_translation_preview(
+        translation_id, range_header, db
+    )
+    object_range = f"bytes={byte_range.start}-{byte_range.end}" if byte_range else None
+    try:
+        body = await asyncio.to_thread(
+            get_object_stream,
+            translation.storage_key,
+            object_range,
+        )
+    except (ObjectStorageError, ValueError) as exc:
+        logger.error(
+            "Markdown object stream failed translation_id=%s storage_key=%s",
+            translation.id,
+            translation.storage_key,
+            exc_info=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The Markdown object is temporarily unavailable",
+        ) from exc
+
+    content_length = byte_range.length if byte_range else metadata.size
+    headers = _preview_headers(
+        translation.filename,
+        metadata,
+        content_length,
+        byte_range,
+        extension=".md",
+    )
+    return StreamingResponse(
+        _stream_object(body),
+        status_code=status.HTTP_206_PARTIAL_CONTENT
+        if byte_range
+        else status.HTTP_200_OK,
+        media_type="text/markdown; charset=utf-8",
+        headers=headers,
+    )
+
+
+@router.head(
+    "/documents/{translation_id}/markdown",
+    response_class=Response,
+)
+async def head_translation_markdown(
+    translation_id: str,
+    range_header: str | None = Header(default=None, alias="Range"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return translated Markdown metadata without opening the Garage body."""
+
+    translation, metadata, byte_range = await _prepare_translation_preview(
+        translation_id, range_header, db
+    )
+    content_length = byte_range.length if byte_range else metadata.size
+    return Response(
+        status_code=status.HTTP_206_PARTIAL_CONTENT
+        if byte_range
+        else status.HTTP_200_OK,
+        media_type="text/markdown; charset=utf-8",
+        headers=_preview_headers(
+            translation.filename,
+            metadata,
+            content_length,
+            byte_range,
+            extension=".md",
+        ),
+    )
+
+
+@router.get(
+    "/documents/{split_id}/images",
+    response_class=StreamingResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def get_split_image(
+    split_id: str,
+    range_header: str | None = Header(default=None, alias="Range"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stream one split image from Garage."""
+
+    split, metadata, byte_range = await _prepare_split_image_preview(
+        split_id, range_header, db
+    )
+    object_range = f"bytes={byte_range.start}-{byte_range.end}" if byte_range else None
+    try:
+        body = await asyncio.to_thread(
+            get_object_stream,
+            split.storage_key,
+            object_range,
+        )
+    except (ObjectStorageError, ValueError) as exc:
+        logger.error(
+            "Split image object stream failed split_id=%s storage_key=%s",
+            split.id,
+            split.storage_key,
+            exc_info=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The split image is temporarily unavailable",
+        ) from exc
+
+    content_length = byte_range.length if byte_range else metadata.size
+    headers = _preview_headers(
+        split.filename,
+        metadata,
+        content_length,
+        byte_range,
+        extension=None,
+    )
+    return StreamingResponse(
+        _stream_object(body),
+        status_code=status.HTTP_206_PARTIAL_CONTENT
+        if byte_range
+        else status.HTTP_200_OK,
+        media_type=split.file_type,
+        headers=headers,
+    )
+
+
+@router.head(
+    "/documents/{split_id}/images",
+    response_class=Response,
+)
+async def head_split_image(
+    split_id: str,
+    range_header: str | None = Header(default=None, alias="Range"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return split image metadata without opening the Garage body."""
+
+    split, metadata, byte_range = await _prepare_split_image_preview(
+        split_id, range_header, db
+    )
+    content_length = byte_range.length if byte_range else metadata.size
+    return Response(
+        status_code=status.HTTP_206_PARTIAL_CONTENT
+        if byte_range
+        else status.HTTP_200_OK,
+        media_type=split.file_type,
+        headers=_preview_headers(
+            split.filename,
+            metadata,
+            content_length,
+            byte_range,
+            extension=None,
+        ),
     )
 
 
