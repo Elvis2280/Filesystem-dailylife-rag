@@ -69,6 +69,15 @@ class Settings(BaseSettings):
     QDRANT_HOST: str = "qdrant"
     QDRANT_PORT: int = 6333
 
+    # Garage / S3-compatible object storage
+    GARAGE_HOST: str = "garage"
+    GARAGE_PORT: int = 3900
+    OBJECT_STORAGE_ENDPOINT: str = "http://garage:3900"
+    OBJECT_STORAGE_ACCESS_KEY: str = "GK00000000000000000000000000000000"
+    OBJECT_STORAGE_SECRET_KEY: str = "0" * 64
+    OBJECT_STORAGE_BUCKET: str = "memory-rag"
+    OBJECT_STORAGE_REGION: str = "garage"
+
     # Postgres
     POSTGRES_HOST: str = "postgres"
     POSTGRES_PORT: int = 5432
@@ -121,27 +130,10 @@ class Settings(BaseSettings):
             return self.OLLAMA_BASE_URL
         return f"http://{self.OLLAMA_HOST}:{self.OLLAMA_PORT}"
 
-    # Brain Storage
-    BRAIN_PATH: str = "./brain"
-    BRAIN_WORKSPACES_PATH: str = "./brain/workspaces"
-
     @property
     def REQUIRED_DIRS(self) -> list[str]:
         """Full paths of all required directories for startup validation."""
-        return [self.BRAIN_PATH]
-
-    @property
-    def BRAIN_WORKSPACE_SUBDIRS(self) -> list[str]:
-        """Per-workspace subdirectory layout."""
-        return ["files", "translation/english", "translation/japanese"]
-
-    def workspace_path(self, workspace_id: str) -> str:
-        """Return the filesystem root for a workspace (creates subdirs on call)."""
-        return str(Path(self.BRAIN_WORKSPACES_PATH) / workspace_id)
-
-    def workspace_subdir(self, workspace_id: str, subdir: str) -> str:
-        """Return a specific subdirectory path under a workspace."""
-        return str(Path(self.BRAIN_WORKSPACES_PATH) / workspace_id / subdir)
+        return [self.TEMP_PATH]
 
     @property
     def DATABASE_URL(self) -> str:
@@ -157,10 +149,10 @@ class Settings(BaseSettings):
         return [
             (self.REDIS_HOST, self.REDIS_PORT),
             (self.POSTGRES_HOST, self.POSTGRES_PORT),
+            (self.GARAGE_HOST, self.GARAGE_PORT),
         ]
 
-    # Upload Staging
-    UPLOAD_PATH: str = "./storage/uploads"
+    # Local scratch space. Durable files live in Garage.
     TEMP_PATH: str = "./temp_storage"
     TEMP_OCR_PATH: str = "./temp_storage/ocr"
 
@@ -181,8 +173,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _resolve_paths_to_absolute(self) -> "Settings":
-        self.BRAIN_PATH = str(Path(self.BRAIN_PATH).resolve())
-        self.BRAIN_WORKSPACES_PATH = str(Path(self.BRAIN_WORKSPACES_PATH).resolve())
         self.TEMP_PATH = str(Path(self.TEMP_PATH).resolve())
         self.TEMP_OCR_PATH = str(Path(self.TEMP_OCR_PATH).resolve())
         return self

@@ -17,12 +17,13 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Import all models here so Alembic detects them
-from app.models.workspace import WorkspaceModel  # noqa: E402, F401
-from app.models.disabled_workspace import DisabledWorkspace  # noqa: E402, F401
-from app.models.document import Document  # noqa: E402, F401
-from app.models.document_history import DocumentHistoryModel  # noqa: E402, F401
-from app.models.file_conversions import FileConversionModel  # noqa: E402, F401
-from app.models.translation import TranslationModel  # noqa: E402, F401
+from app.models import (  # noqa: E402, F401
+    Document,
+    DocumentEventModel,
+    DocumentSplitModel,
+    TranslationModel,
+    WorkspaceModel,
+)
 
 target_metadata = Base.metadata
 

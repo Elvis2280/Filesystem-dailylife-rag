@@ -1,3 +1,12 @@
+x-object-storage-environment: &object_storage_environment
+  GARAGE_HOST: garage
+  GARAGE_PORT: 3900
+  OBJECT_STORAGE_ENDPOINT: http://garage:3900
+  OBJECT_STORAGE_ACCESS_KEY: ${GARAGE_ACCESS_KEY:?GARAGE_ACCESS_KEY is required}
+  OBJECT_STORAGE_SECRET_KEY: ${GARAGE_SECRET_KEY:?GARAGE_SECRET_KEY is required}
+  OBJECT_STORAGE_BUCKET: ${GARAGE_BUCKET:-memory-rag}
+  OBJECT_STORAGE_REGION: garage
+
 services:
   nginx:
     image: nginx:alpine
@@ -17,14 +26,17 @@ services:
       - '8000'
     env_file:
       - .env
+    environment: *object_storage_environment
     volumes:
-      - brain_data:/app/brain
-      - storage:/app/storage
       - ./alembic:/app/alembic
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       qdrant:
+        condition: service_healthy
+      garage:
         condition: service_healthy
     networks:
       - frontend
@@ -40,10 +52,15 @@ services:
     command: celery -A workers.celery_app worker --loglevel=info --pool=threads
     env_file:
       - .env
+    environment: *object_storage_environment
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       qdrant:
+        condition: service_healthy
+      garage:
         condition: service_healthy
     volumes:
       - model_cache:/home/appuser/.cache
@@ -61,10 +78,15 @@ services:
     command: celery -A workers.celery_app worker --loglevel=info --pool=threads
     env_file:
       - .env
+    environment: *object_storage_environment
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       qdrant:
+        condition: service_healthy
+      garage:
         condition: service_healthy
     volumes:
       - model_cache:/home/appuser/.cache
@@ -108,6 +130,28 @@ services:
       - backend
     restart: unless-stopped
 
+  garage:
+    image: dxflrs/garage:v2.3.0
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?GARAGE_RPC_SECRET is required}
+      GARAGE_DEFAULT_ACCESS_KEY: ${GARAGE_ACCESS_KEY:?GARAGE_ACCESS_KEY is required}
+      GARAGE_DEFAULT_SECRET_KEY: ${GARAGE_SECRET_KEY:?GARAGE_SECRET_KEY is required}
+      GARAGE_DEFAULT_BUCKET: ${GARAGE_BUCKET:-memory-rag}
+    volumes:
+      - ./docker/garage/garage.toml:/etc/garage.toml:ro
+      - garage_meta:/var/lib/garage/meta
+      - garage_data:/var/lib/garage/data
+    healthcheck:
+      test: ["CMD", "/garage", "json-api", "GetClusterHealth"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - backend
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -133,8 +177,8 @@ networks:
     internal: true
 
 volumes:
-  brain_data:
+  garage_data:
+  garage_meta:
   qdrant_data:
   model_cache:
-  storage:
   postgres_data:

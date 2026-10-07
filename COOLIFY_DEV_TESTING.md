@@ -8,7 +8,7 @@ hot-reload development stack.
 
 - Linux server managed by Coolify with Docker Compose support.
 - Ollama installed and running directly on the same server as Coolify.
-- Enough disk space for PostgreSQL, Qdrant, uploaded files, Hugging Face model
+- Enough disk space for PostgreSQL, Qdrant, Garage objects, Hugging Face model
   caches, and the host Ollama models.
 - Enough VRAM/RAM for the models already installed in host Ollama. The default
   `qwen3.5:27b` translation model may require substantially more memory than the
@@ -106,6 +106,9 @@ Required:
 ```env
 API_KEY=generate-a-long-random-dev-testing-key
 POSTGRES_PASSWORD=generate-a-strong-password
+GARAGE_RPC_SECRET=generate-64-random-hex-characters
+GARAGE_ACCESS_KEY=generate-a-valid-garage-access-key
+GARAGE_SECRET_KEY=generate-a-strong-garage-secret-key
 ```
 
 Recommended values:
@@ -122,6 +125,7 @@ OLLAMA_MODEL_EMBEDDING=bge-m3
 OLLAMA_MODEL_AGENT=qwen3.5:9b
 OLLAMA_TIMEOUT=600
 EMBEDDING_DEVICE=cpu
+GARAGE_BUCKET=memory-rag
 # Use the HTTPS Ollama endpoint:
 OLLAMA_BASE_URL=https://ollama.tail1e26db.ts.net
 # Or unset OLLAMA_BASE_URL and use the HTTP fallback:
@@ -129,7 +133,9 @@ OLLAMA_BASE_URL=https://ollama.tail1e26db.ts.net
 # OLLAMA_PORT=11435
 ```
 
-Coolify should generate and store `API_KEY` and `POSTGRES_PASSWORD` as secrets.
+Coolify should generate and store `API_KEY`, `POSTGRES_PASSWORD`, and all
+`GARAGE_*` credentials as secrets. The application containers use the internal
+`http://garage:3900` S3 endpoint; do not publish Garage through a Coolify domain.
 The `OLLAMA_MODEL_*` values must exactly match the model names shown by
 `ollama list` on the Ollama server. The deployment runs `ollama-check`, which
 retries the configured endpoint and blocks API/worker startup if a model is
@@ -149,7 +155,7 @@ Tauri application can be extracted. It is not production user authentication.
 
 Startup is ordered as follows:
 
-1. PostgreSQL, Redis, and Qdrant become healthy.
+1. PostgreSQL, Redis, Qdrant, and Garage become healthy.
 2. `migrate` runs `alembic upgrade head` from the image contents.
 3. `ollama-check` retries the configured Ollama endpoint and validates all configured
    model names.
@@ -159,11 +165,11 @@ Check the `ollama-check`, `migrate`, `api`, and `worker` logs in Coolify.
 Successful one-shot services should show an exited-successfully state; API
 health is available at `/health`.
 
-The Compose file uses named volumes for PostgreSQL, Qdrant, brain data, uploaded
-storage, temporary processing data, and model cache. Host Ollama owns its model
+The Compose file uses named volumes for PostgreSQL, Qdrant, Garage metadata and
+objects, temporary processing data, and model cache. Host Ollama owns its model
 storage outside this Coolify application. Keep the Compose volumes when
-redeploying and back up both those volumes and the host Ollama model directory
-according to the server's storage policy.
+redeploying and back up both Garage volumes, the other persistent volumes, and
+the host Ollama model directory according to the server's storage policy.
 
 The API container's port `8000` is published only on the server's private LAN
 address as `<server-lan-ip>:18080`. PostgreSQL, Redis, Qdrant, and Ollama do not
@@ -210,5 +216,5 @@ different origin, add that exact origin to `CORS_ORIGINS` and redeploy.
   on the trusted LAN.
 - Upload, document processing, progress notifications, chat, and workspace
   operations work over the private LAN address.
-- Re-deploying preserves database, Qdrant, Ollama, brain, and uploaded data.
+- Re-deploying preserves PostgreSQL, Qdrant, Garage objects, and Ollama data.
 - The existing local Compose stack still starts with reload and local mounts.

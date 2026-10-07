@@ -2,7 +2,6 @@ import json
 import logging
 from datetime import datetime
 
-import fitz
 from sqlalchemy.orm import Session
 
 from app.core.constant import (
@@ -13,11 +12,12 @@ from app.core.constant import (
 from app.core.database import get_sync_db
 from app.core.redis_client import redis_client
 from app.models.document import Document
-from app.models.document_history import DocumentHistoryModel
+from app.models.document_event import DocumentEventModel
 from app.models.workspace import WorkspaceModel
 from app.services.format.format import format_all_markdown
 from app.services.ocr.file_ocr_llm import extract_image_text
 from app.services.storage.document_sync import (
+    cleanup_pipeline_temp,
     convert_to_images,
     convert_to_pdf,
     ensure_pdf_in_workspace,
@@ -29,14 +29,6 @@ from workers.celery_app import celery_app
 
 def _is_pdf(mime_type: str) -> bool:
     return mime_type == "application/pdf"
-
-
-def _count_pdf_pages(path: str) -> int:
-    doc = fitz.open(path)
-    try:
-        return doc.page_count
-    finally:
-        doc.close()
 
 
 def _publish_status(
@@ -76,17 +68,20 @@ def _publish_status(
         )
 
     if db_session is not None:
-        history = DocumentHistoryModel(
-            document_id=document_id,
-            status=status,
-            stage=stage.value,
-            step=stage.step,
-            message=message or stage.message,
-            page_number=page_number,
-            total_pages=total_pages,
-        )
-        db_session.add(history)
-        db_session.commit()
+        document = db_session.query(Document).filter_by(id=document_id).first()
+        if document is not None:
+            event = DocumentEventModel(
+                document_id=document_id,
+                workspace_id=document.workspace_id,
+                status=status,
+                stage=stage.value,
+                step=stage.step,
+                message=message or stage.message,
+                page_number=page_number,
+                total_pages=total_pages,
+            )
+            db_session.add(event)
+            db_session.commit()
 
 
 def _set_status(
@@ -116,6 +111,7 @@ def process_file_upload(self, document_id: str) -> None:
     document = None
     original_filename = ""
     workspace_name = ""
+    workspace_id_for_cleanup = ""
     try:
         with get_sync_db() as db_session:
             document = db_session.query(Document).filter_by(id=document_id).first()
@@ -123,6 +119,10 @@ def process_file_upload(self, document_id: str) -> None:
                 raise ValueError(
                     f"Document with ID {document_id} not found in database."
                 )
+
+            document.attempt_count += 1
+            document.last_error = None
+            db_session.commit()
 
             original_filename = document.original_filename
             workspace = (
@@ -135,6 +135,7 @@ def process_file_upload(self, document_id: str) -> None:
                     f"Workspace with ID {document.workspace_id} not found in database."
                 )
             workspace_name = workspace.name
+            workspace_id_for_cleanup = str(document.workspace_id)
 
             def publish_status(
                 status_document_id: str,
@@ -166,12 +167,13 @@ def process_file_upload(self, document_id: str) -> None:
                 )
             ).lower()
             is_pdf = _is_pdf(document.mime_type)
+            processing_document_id = document_id
 
             _set_status(document, FileStatus.FILE_UPLOADED, db_session)
             publish_status(
                 document_id,
-                FilePipelineStage.PENDING,
-                message="File uploaded, starting processing...",
+                FilePipelineStage.OBJECT_STORAGE,
+                message="Original file available in Garage; starting processing...",
                 status=FileStatus.FILE_UPLOADED.value,
                 db_session=db_session,
             )
@@ -192,17 +194,10 @@ def process_file_upload(self, document_id: str) -> None:
                 db_session.commit()
 
                 converted_pdf_result = convert_to_pdf(document_id, db_session)
-                ext = f".{converted_pdf_result.converted_to_extension.lower()}"
-
-                try:
-                    pdf_path = converted_pdf_result.converted_file_path
-                    page_count = _count_pdf_pages(pdf_path)
-                    document.page_count = page_count
-                    db_session.commit()
-                except Exception as exc:
-                    logging.getLogger("memory_rag.pipeline").warning(
-                        "Could not read page_count from generated PDF: %s", exc
-                    )
+                processing_document_id = str(converted_pdf_result.id)
+                ext = ".pdf"
+                document.page_count = converted_pdf_result.page_count
+                db_session.commit()
 
                 _set_status(document, FileStatus.FILE_CONVERSION_FINISHED, db_session)
                 publish_status(
@@ -227,11 +222,12 @@ def process_file_upload(self, document_id: str) -> None:
                 document.status = "processing_pdf_to_image"
                 db_session.commit()
 
-                ensure_pdf_in_workspace(document_id, db_session)
+                processing_document = ensure_pdf_in_workspace(document_id, db_session)
+                processing_document_id = str(processing_document.id)
 
                 list_images_metadata = convert_to_images(document_id, db_session)
                 if len(list_images_metadata) > 0:
-                    ext = f".{list_images_metadata[0].converted_to_extension.lower()}"
+                    ext = ".png"
 
             if ext in ALLOWED_IMAGE_EXTENSIONS:
                 images_path = return_list_images_path(document_id, db_session)
@@ -323,7 +319,7 @@ def process_file_upload(self, document_id: str) -> None:
 
                     try:
                         save_ocr_page(
-                            document_id,
+                            processing_document_id,
                             str(document.workspace_id),
                             page_number=idx + 1,
                             text=text,
@@ -402,6 +398,7 @@ def process_file_upload(self, document_id: str) -> None:
                 return None
             except Exception as format_error:
                 document.status = FileStatus.FAILED.value
+                document.last_error = str(format_error)
                 db_session.commit()
                 logging.getLogger("memory_rag.pipeline").error(
                     "Translation/formatting failed for document %s: %s",
@@ -420,6 +417,7 @@ def process_file_upload(self, document_id: str) -> None:
     except Exception as e:
         if document is not None and db_session is not None:
             document.status = FileStatus.FAILED.value
+            document.last_error = str(e)
             db_session.commit()
         _publish_status(
             document_id,
@@ -431,3 +429,13 @@ def process_file_upload(self, document_id: str) -> None:
             db_session=db_session,
         )
         raise
+    finally:
+        if workspace_id_for_cleanup:
+            try:
+                cleanup_pipeline_temp(workspace_id_for_cleanup, document_id)
+            except Exception as cleanup_error:
+                logging.getLogger("memory_rag.pipeline").warning(
+                    "Failed to clean pipeline temp files for document %s: %s",
+                    document_id,
+                    cleanup_error,
+                )

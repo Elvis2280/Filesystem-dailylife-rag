@@ -1,11 +1,20 @@
+from __future__ import annotations
+
 import uuid
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, String
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.document import Document
+    from app.models.document_event import DocumentEventModel
+    from app.models.document_split import DocumentSplitModel
+    from app.models.translation import TranslationModel
 
 
 class WorkspaceModel(Base):
@@ -31,4 +40,26 @@ class WorkspaceModel(Base):
     )
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+    documents: Mapped[list[Document]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        overlaps="parent,children",
+    )
+    translations: Mapped[list[TranslationModel]] = relationship(
+        back_populates="workspace",
+        passive_deletes=True,
+        overlaps="document_split,translations",
+    )
+    document_splits: Mapped[list[DocumentSplitModel]] = relationship(
+        back_populates="workspace",
+        passive_deletes=True,
+        overlaps="document,splits",
+    )
+    document_events: Mapped[list[DocumentEventModel]] = relationship(
+        back_populates="workspace",
+        passive_deletes=True,
+        overlaps="document,events",
     )

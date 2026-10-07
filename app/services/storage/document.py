@@ -1,39 +1,51 @@
-"""Document upload and persistence service.
+"""Document upload and Garage-backed persistence services."""
 
-Handles the initial document upload flow: saves uploaded files to disk
-(workspace files/ for PDFs, temp_storage/ for non-PDFs), captures
-page count for PDFs, creates the database record, and dispatches a
-Celery OCR task for async processing.
-"""
+from __future__ import annotations
 
 import asyncio
-import logging
+import shutil
+import tempfile
 import uuid
 from pathlib import Path
 
 import fitz
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.constant import DocumentsType, FilePipelineStage
+from app.core.constant import FilePipelineStage
 from app.core.redis_client import redis_client
 from app.models.document import Document
-from app.models.document_history import DocumentHistoryModel
-from app.models.file_conversions import FileConversionModel
+from app.models.document_event import DocumentEventModel
 from app.services.ocr.utils import build_libreoffice_command
-from workers.tasks.file_pipeline import process_file_upload as dispatch_pipeline_task
+from app.services.storage.file_metadata import (
+    converted_document_key,
+    original_document_key,
+    sha256_file,
+)
+from app.services.storage.object_storage import (
+    delete_object,
+    download_file,
+    object_exists,
+    put_file,
+)
 
-logger = logging.getLogger("memory_rag.document")
+
+class DuplicateDocumentError(ValueError):
+    """Raised when the same original file already exists in a workspace."""
+
+    def __init__(self, existing_document_id: uuid.UUID):
+        super().__init__(f"Document already exists: {existing_document_id}")
+        self.existing_document_id = existing_document_id
 
 
 def _count_pdf_pages(path: Path) -> int:
-    doc = fitz.open(str(path))
+    pdf = fitz.open(str(path))
     try:
-        return doc.page_count
+        return pdf.page_count
     finally:
-        doc.close()
+        pdf.close()
 
 
 async def process_document_upload(
@@ -42,133 +54,215 @@ async def process_document_upload(
     db: AsyncSession,
 ) -> tuple[Document, str]:
     document_id = uuid.uuid4()
-    ext = (file.filename.rsplit(".", 1)[-1] or "").lower()
-    base_filename = file.filename[: -len(ext) - 1] if ext else file.filename
-    is_pdf = file.content_type == "application/pdf"
+    workspace_uuid = uuid.UUID(workspace_id)
+    uploaded_name = Path(file.filename or "unnamed").name
+    ext = uploaded_name.rsplit(".", 1)[-1].lower() if "." in uploaded_name else ""
+    mime_type = file.content_type or "application/octet-stream"
+    is_pdf = mime_type == "application/pdf"
     stored_filename = (
         f"{document_id}_original.{ext}" if ext else f"{document_id}_original"
     )
 
-    if is_pdf:
-        target_dir = Path(settings.workspace_subdir(workspace_id, "files"))
-    else:
-        target_dir = Path(settings.temp_workspace_path(workspace_id))
-    target_dir.mkdir(parents=True, exist_ok=True)
-    file_path = target_dir / stored_filename
+    Path(settings.TEMP_PATH).mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f"upload-{document_id}-",
+        dir=settings.TEMP_PATH,
+    ) as temp_dir:
+        file_path = Path(temp_dir) / stored_filename
 
-    def _sync_copy():
-        with open(file_path, "wb") as f:
-            import shutil
+        def _sync_copy() -> None:
+            with file_path.open("wb") as output:
+                shutil.copyfileobj(file.file, output)
 
-            shutil.copyfileobj(file.file, f)
+        await asyncio.to_thread(_sync_copy)
+        file_size = file_path.stat().st_size
+        checksum = await asyncio.to_thread(sha256_file, file_path)
 
-    await asyncio.to_thread(_sync_copy)
+        duplicate_result = await db.execute(
+            select(Document).where(
+                and_(
+                    Document.workspace_id == workspace_uuid,
+                    Document.parent_document_id.is_(None),
+                    Document.file_role == "original",
+                    Document.checksum_sha256 == checksum,
+                )
+            )
+        )
+        existing = duplicate_result.scalar_one_or_none()
+        if existing:
+            raise DuplicateDocumentError(existing.id)
 
-    page_count: int | None = None
-    if is_pdf:
-        try:
-            page_count = await asyncio.to_thread(_count_pdf_pages, file_path)
-        except Exception as e:
-            file_path.unlink(missing_ok=True)
-            raise ValueError(
-                f"Could not read PDF (file may be corrupt or encrypted): {e}"
-            ) from e
+        page_count: int | None = None
+        if is_pdf:
+            try:
+                page_count = await asyncio.to_thread(_count_pdf_pages, file_path)
+            except Exception as exc:
+                raise ValueError(
+                    f"Could not read PDF (file may be corrupt or encrypted): {exc}"
+                ) from exc
+        elif mime_type in {"image/png", "image/jpeg", "image/webp"}:
+            page_count = 1
+
+        object_key = original_document_key(
+            workspace_uuid,
+            document_id,
+            stored_filename,
+        )
+        await asyncio.to_thread(put_file, file_path, object_key, mime_type)
 
     document = Document(
         id=document_id,
-        workspace_id=uuid.UUID(workspace_id),
-        original_filename=base_filename,
+        workspace_id=workspace_uuid,
+        file_role="original",
+        original_filename=uploaded_name,
         stored_filename=stored_filename,
-        mime_type=file.content_type or "application/octet-stream",
+        storage_key=object_key,
+        storage_area="workspace",
+        mime_type=mime_type,
+        file_extension=ext or None,
         page_count=page_count,
+        size=file_size,
+        checksum_sha256=checksum,
     )
     db.add(document)
-    await db.commit()
-    await db.refresh(document)
-
-    initial_history = DocumentHistoryModel(
-        document_id=document_id,
-        status="file_uploaded",
-        stage="pending",
-        step=FilePipelineStage.PENDING.step,
-        message="File uploaded, queued for processing",
+    db.add_all(
+        [
+            DocumentEventModel(
+                document_id=document_id,
+                workspace_id=workspace_uuid,
+                status="file_uploaded",
+                stage=FilePipelineStage.UPLOAD.value,
+                step=FilePipelineStage.UPLOAD.step,
+                message="File received by the upload endpoint",
+            ),
+            DocumentEventModel(
+                document_id=document_id,
+                workspace_id=workspace_uuid,
+                status="stored_in_object_storage",
+                stage=FilePipelineStage.OBJECT_STORAGE.value,
+                step=FilePipelineStage.OBJECT_STORAGE.step,
+                message="Original file persisted in Garage",
+            ),
+        ]
     )
-    db.add(initial_history)
-    await db.commit()
-
-    if is_pdf:
-        original_record = FileConversionModel(
-            file_id=document_id,
-            converted_file_path=str(file_path),
-            converted_mime_type=file.content_type or "application/pdf",
-            converted_to_extension="pdf",
-            document_type=DocumentsType.ORIGINAL_FILE.value,
-        )
-        db.add(original_record)
+    try:
         await db.commit()
+        await db.refresh(document)
+    except Exception:
+        await db.rollback()
+        await asyncio.to_thread(delete_object, object_key)
+        raise
+
+    from workers.tasks.file_pipeline import (
+        process_file_upload as dispatch_pipeline_task,
+    )
 
     task = dispatch_pipeline_task.delay(str(document_id))
     redis_client.setex(f"document_task:{document_id}", 1800, task.id)
-
     return document, task.id
 
 
-async def convert_to_pdf(
-    document_id: str, db_session: AsyncSession
-) -> FileConversionModel:
-    query_result = await db_session.execute(
+async def convert_to_pdf(document_id: str, db_session: AsyncSession) -> Document:
+    result = await db_session.execute(
         select(Document).where(Document.id == document_id)
     )
-    document = query_result.scalar_one_or_none()
+    document = result.scalar_one_or_none()
     if not document:
         raise ValueError(f"Document with ID {document_id} not found in database.")
-    is_pdf = document.mime_type == "application/pdf"
+    if document.file_role != "original":
+        raise ValueError("Only original documents can be converted to PDF.")
+    if document.mime_type == "application/pdf":
+        return document
 
-    if is_pdf:
-        raise ValueError(
-            f"Document with ID {document_id} is already a PDF, cannot convert."
+    existing_result = await db_session.execute(
+        select(Document).where(
+            Document.parent_document_id == document.id,
+            Document.file_role == "converted_pdf",
         )
-
-    # Resolve input path from stored_filename + workspace_id
-    input_dir = Path(settings.temp_workspace_path(str(document.workspace_id)))
-    input_path = (input_dir / document.stored_filename).resolve()
-
-    if not input_path.exists():
-        raise ValueError(f"Document file not found on disk: {input_path}")
-
-    output_path = Path(settings.workspace_subdir(str(document.workspace_id), "files"))
-    output_path.mkdir(parents=True, exist_ok=True)
-    libreoffice_command = build_libreoffice_command(str(input_path), str(output_path))
-    proc = await asyncio.create_subprocess_exec(
-        *libreoffice_command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    existing_pdf = existing_result.scalar_one_or_none()
+    if existing_pdf and await asyncio.to_thread(
+        object_exists, existing_pdf.storage_key
+    ):
+        return existing_pdf
 
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"LibreOffice conversion failed with return code {proc.returncode}. "
-            f"stderr: {stderr.decode().strip()}"
-        )
-
-    expected_pdf = output_path / input_path.with_suffix(".pdf").name
-    if not expected_pdf.exists():
-        raise RuntimeError(
-            f"Expected converted PDF not found at {expected_pdf} after LibreOffice conversion. "
-            f"stderr: {stderr.decode().strip()}, stdout: {stdout.decode().strip()}"
-        )
-
-    converted_pdf_metadata = FileConversionModel(
-        file_id=document_id,
-        converted_file_path=str(expected_pdf),
-        converted_mime_type="application/pdf",
-        converted_to_extension="pdf",
-        document_type=DocumentsType.CONVERTED_PDF.value,
+    converted_id = existing_pdf.id if existing_pdf else uuid.uuid4()
+    object_key = converted_document_key(
+        document.workspace_id,
+        document.id,
+        converted_id,
     )
+    Path(settings.TEMP_PATH).mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f"convert-{document.id}-",
+        dir=settings.TEMP_PATH,
+    ) as temp_dir:
+        output_dir = Path(temp_dir)
+        input_path = output_dir / document.stored_filename
+        await asyncio.to_thread(download_file, document.storage_key, input_path)
+        process = await asyncio.create_subprocess_exec(
+            *build_libreoffice_command(str(input_path), str(output_dir)),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"LibreOffice conversion failed with return code {process.returncode}. "
+                f"stderr: {stderr.decode().strip()}"
+            )
 
-    db_session.add(converted_pdf_metadata)
-    await db_session.commit()
-    await db_session.refresh(converted_pdf_metadata)
+        expected_pdf = output_dir / input_path.with_suffix(".pdf").name
+        if not expected_pdf.exists():
+            raise RuntimeError(
+                f"Expected converted PDF was not generated. "
+                f"stderr: {stderr.decode().strip()}, stdout: {stdout.decode().strip()}"
+            )
+        converted_size = expected_pdf.stat().st_size
+        converted_checksum = await asyncio.to_thread(sha256_file, expected_pdf)
+        converted_pages = await asyncio.to_thread(_count_pdf_pages, expected_pdf)
+        await asyncio.to_thread(
+            put_file,
+            expected_pdf,
+            object_key,
+            "application/pdf",
+        )
 
-    return converted_pdf_metadata
+    converted = existing_pdf or Document(
+        id=converted_id,
+        workspace_id=document.workspace_id,
+        parent_document_id=document.id,
+        file_role="converted_pdf",
+        original_filename=f"{Path(document.original_filename).stem}.pdf",
+        stored_filename=f"{converted_id}.pdf",
+        storage_key=object_key,
+        storage_area="workspace",
+        mime_type="application/pdf",
+        file_extension="pdf",
+    )
+    converted.storage_key = object_key
+    converted.size = converted_size
+    converted.checksum_sha256 = converted_checksum
+    converted.page_count = converted_pages
+    converted.status = "completed"
+    converted.last_error = None
+    document.page_count = converted_pages
+    db_session.add(converted)
+    db_session.add(
+        DocumentEventModel(
+            document_id=document.id,
+            workspace_id=document.workspace_id,
+            status="file_conversion_finished",
+            stage=FilePipelineStage.PDF_CONVERSION.value,
+            step=FilePipelineStage.PDF_CONVERSION.step,
+            message=f"Converted PDF persisted in Garage as {object_key}",
+        )
+    )
+    try:
+        await db_session.commit()
+        await db_session.refresh(converted)
+    except Exception:
+        await db_session.rollback()
+        await asyncio.to_thread(delete_object, object_key)
+        raise
+    return converted

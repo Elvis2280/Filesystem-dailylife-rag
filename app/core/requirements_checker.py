@@ -1,3 +1,4 @@
+import asyncio
 import socket
 from pathlib import Path
 
@@ -16,17 +17,6 @@ def ensure_directories() -> dict:
         "status": "satisfied" if not missing else "missing",
         "paths": missing,
     }
-
-
-def ensure_workspace_dirs(workspace_id: str) -> list[str]:
-    """Create per-workspace subdirectories on disk. Return list of created paths."""
-    created = []
-    for subdir in settings.BRAIN_WORKSPACE_SUBDIRS:
-        path = Path(settings.workspace_subdir(workspace_id, subdir))
-        if not path.exists():
-            path.mkdir(parents=True)
-            created.append(str(path))
-    return created
 
 
 def check_service(host: str, port: int, timeout: int = 5) -> bool:
@@ -57,6 +47,17 @@ async def check_postgres_db() -> bool:
         return False
 
 
+async def check_object_storage() -> bool:
+    """Verify that Garage is reachable and the configured bucket is available."""
+    from app.services.storage.object_storage import check_bucket
+
+    try:
+        await asyncio.to_thread(check_bucket)
+        return True
+    except Exception:
+        return False
+
+
 async def validate_all() -> dict:
     """Run all checks. Return report dict with created dirs and service status."""
     report = {
@@ -66,5 +67,6 @@ async def validate_all() -> dict:
             for host, port in settings.REQUIRED_SERVICES
         },
         "postgres_db": await check_postgres_db(),
+        "object_storage": await check_object_storage(),
     }
     return report

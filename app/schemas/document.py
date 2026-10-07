@@ -13,7 +13,7 @@ class DocumentUploadResponse(BaseModel):
         ..., description="Original name of the uploaded file"
     )
     mime_type: str = Field(..., description="Detected MIME type of the file")
-    stored_filename: str = Field(..., description="Filename on disk")
+    stored_filename: str = Field(..., description="Filename stored in Garage")
     page_count: int | None = Field(None, description="Number of pages (PDFs only)")
     status: str = Field(..., description="Current processing status")
     message: str = Field(..., description="Human-readable status message")
@@ -25,7 +25,9 @@ class FileConversionPayload(BaseModel):
 
 class FileConversionResponse(BaseModel):
     file_id: str = Field(..., description="UUID of the original file")
-    converted_file_path: str = Field(..., description="Path to the converted file")
+    converted_file_path: str = Field(
+        ..., description="Garage object key for the converted file"
+    )
     converted_mime_type: str = Field(..., description="MIME type of the converted file")
     converted_to_extension: str = Field(
         ..., description="File extension of the converted file"

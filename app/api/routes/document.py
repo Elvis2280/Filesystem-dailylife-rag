@@ -1,7 +1,12 @@
-import json
+import asyncio
 import logging
 import uuid
-from pathlib import Path
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from datetime import timezone
+from email.utils import format_datetime
+from pathlib import PurePath
+from urllib.parse import quote
 
 from celery.result import AsyncResult
 from fastapi import (
@@ -9,13 +14,15 @@ from fastapi import (
     Depends,
     File,
     Form,
+    Header,
     HTTPException,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
     status,
 )
-from sqlalchemy import and_, select
+from fastapi.responses import Response, StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.api_key import is_api_key_valid
@@ -24,7 +31,6 @@ from app.core.database import get_db
 from app.core.redis_client import get_async_redis_client
 from app.core.websocket_manager import manager
 from app.models.document import Document
-from app.models.file_conversions import FileConversionModel
 from app.models.workspace import WorkspaceModel
 from app.schemas.document import (
     DocumentStatusResponse,
@@ -32,7 +38,22 @@ from app.schemas.document import (
     FileConversionPayload,
     FileConversionResponse,
 )
-from app.services.storage.document import convert_to_pdf, process_document_upload
+from app.services.storage.document import (
+    DuplicateDocumentError,
+    convert_to_pdf,
+    process_document_upload,
+)
+from app.services.storage.document_preview import (
+    PdfPreviewNotFound,
+    resolve_pdf_document,
+)
+from app.services.storage.object_storage import (
+    OBJECT_STREAM_CHUNK_SIZE,
+    ObjectMetadata,
+    ObjectStorageError,
+    get_object_stream,
+    head_object,
+)
 from app.services.websocket.document_status import stream_document_status
 from workers.celery_app import celery_app
 
@@ -46,6 +67,175 @@ def _is_valid_uuid(value: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+@dataclass(frozen=True)
+class _ByteRange:
+    start: int
+    end: int
+
+    @property
+    def length(self) -> int:
+        return self.end - self.start + 1
+
+
+class _InvalidByteRange(ValueError):
+    """Raised when a request contains an unsupported or unsatisfiable range."""
+
+
+def _parse_range_integer(value: str) -> int:
+    if not value or not value.isascii() or not value.isdecimal():
+        raise _InvalidByteRange
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise _InvalidByteRange from exc
+
+
+def _parse_range_header(value: str | None, total_size: int) -> _ByteRange | None:
+    if value is None:
+        return None
+    if not value.startswith("bytes="):
+        raise _InvalidByteRange
+
+    range_spec = value[6:].strip()
+    if not range_spec or "," in range_spec or "-" not in range_spec:
+        raise _InvalidByteRange
+
+    start_text, end_text = (part.strip() for part in range_spec.split("-", 1))
+    if total_size <= 0:
+        raise _InvalidByteRange
+
+    if not start_text:
+        suffix_length = _parse_range_integer(end_text)
+        if suffix_length <= 0:
+            raise _InvalidByteRange
+        return _ByteRange(
+            start=max(total_size - suffix_length, 0),
+            end=total_size - 1,
+        )
+
+    start = _parse_range_integer(start_text)
+    if start >= total_size:
+        raise _InvalidByteRange
+
+    if not end_text:
+        end = total_size - 1
+    else:
+        end = min(_parse_range_integer(end_text), total_size - 1)
+
+    if end < start:
+        raise _InvalidByteRange
+    return _ByteRange(start=start, end=end)
+
+
+def _content_disposition(filename: str) -> str:
+    name = PurePath(filename).name or "document.pdf"
+    name = name.replace("\r", "_").replace("\n", "_").replace('"', "_")
+    if not name.lower().endswith(".pdf"):
+        name = f"{PurePath(name).stem or 'document'}.pdf"
+    ascii_name = name.encode("ascii", "ignore").decode("ascii") or "document.pdf"
+    ascii_name = ascii_name.replace("\\", "_").replace('"', "_")
+    encoded_name = quote(name, safe="")
+    return f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded_name}"
+
+
+def _preview_headers(
+    document: Document,
+    metadata: ObjectMetadata,
+    content_length: int,
+    byte_range: _ByteRange | None,
+) -> dict[str, str]:
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(content_length),
+        "Content-Disposition": _content_disposition(document.original_filename),
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if byte_range is not None:
+        headers["Content-Range"] = (
+            f"bytes {byte_range.start}-{byte_range.end}/{metadata.size}"
+        )
+    if metadata.etag:
+        headers["ETag"] = metadata.etag
+    if metadata.last_modified:
+        last_modified = metadata.last_modified
+        if last_modified.tzinfo is None:
+            last_modified = last_modified.replace(tzinfo=timezone.utc)
+        headers["Last-Modified"] = format_datetime(
+            last_modified.astimezone(timezone.utc), usegmt=True
+        )
+    return headers
+
+
+async def _stream_object(body) -> AsyncIterator[bytes]:
+    try:
+        while True:
+            chunk = await asyncio.to_thread(body.read, OBJECT_STREAM_CHUNK_SIZE)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        await asyncio.to_thread(body.close)
+
+
+async def _prepare_pdf_preview(
+    document_id: str,
+    range_header: str | None,
+    db: AsyncSession,
+) -> tuple[Document, ObjectMetadata, _ByteRange | None]:
+    if not _is_valid_uuid(document_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="document_id must be a valid UUID",
+        )
+
+    try:
+        pdf_document = await resolve_pdf_document(uuid.UUID(document_id), db)
+    except PdfPreviewNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="A PDF representation is not available for this document",
+        ) from exc
+
+    try:
+        metadata = await asyncio.to_thread(head_object, pdf_document.storage_key)
+    except (ObjectStorageError, ValueError) as exc:
+        logger.error(
+            "PDF object unavailable document_id=%s storage_key=%s",
+            pdf_document.id,
+            pdf_document.storage_key,
+            exc_info=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The PDF object is temporarily unavailable",
+        ) from exc
+
+    if metadata.size != pdf_document.size:
+        logger.error(
+            "PDF metadata mismatch document_id=%s storage_key=%s "
+            "db_size=%s object_size=%s",
+            pdf_document.id,
+            pdf_document.storage_key,
+            pdf_document.size,
+            metadata.size,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The PDF object metadata is inconsistent",
+        )
+
+    try:
+        byte_range = _parse_range_header(range_header, metadata.size)
+    except _InvalidByteRange as exc:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail="The requested byte range is not satisfiable",
+            headers={"Content-Range": f"bytes */{metadata.size}"},
+        ) from exc
+    return pdf_document, metadata, byte_range
 
 
 @router.post(
@@ -83,6 +273,14 @@ async def upload_document(
 
     try:
         document, task_id = await process_document_upload(str(workspace.id), file, db)
+    except DuplicateDocumentError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "A document with the same content already exists in this workspace.",
+                "document_id": str(e.existing_document_id),
+            },
+        ) from e
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -104,6 +302,76 @@ async def upload_document(
         page_count=document.page_count,
         status=document.status,
         message="File uploaded and queued for OCR processing.",
+    )
+
+
+@router.get(
+    "/documents/{document_id}/pdf",
+    response_class=StreamingResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def get_document_pdf(
+    document_id: str,
+    range_header: str | None = Header(default=None, alias="Range"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stream the canonical PDF for a document from Garage."""
+
+    pdf_document, metadata, byte_range = await _prepare_pdf_preview(
+        document_id, range_header, db
+    )
+    object_range = f"bytes={byte_range.start}-{byte_range.end}" if byte_range else None
+    try:
+        body = await asyncio.to_thread(
+            get_object_stream,
+            pdf_document.storage_key,
+            object_range,
+        )
+    except (ObjectStorageError, ValueError) as exc:
+        logger.error(
+            "PDF object stream failed document_id=%s storage_key=%s",
+            pdf_document.id,
+            pdf_document.storage_key,
+            exc_info=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The PDF object is temporarily unavailable",
+        ) from exc
+
+    content_length = byte_range.length if byte_range else metadata.size
+    headers = _preview_headers(pdf_document, metadata, content_length, byte_range)
+    return StreamingResponse(
+        _stream_object(body),
+        status_code=status.HTTP_206_PARTIAL_CONTENT
+        if byte_range
+        else status.HTTP_200_OK,
+        media_type="application/pdf",
+        headers=headers,
+    )
+
+
+@router.head(
+    "/documents/{document_id}/pdf",
+    response_class=Response,
+)
+async def head_document_pdf(
+    document_id: str,
+    range_header: str | None = Header(default=None, alias="Range"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return canonical PDF metadata without opening the Garage body."""
+
+    pdf_document, metadata, byte_range = await _prepare_pdf_preview(
+        document_id, range_header, db
+    )
+    content_length = byte_range.length if byte_range else metadata.size
+    return Response(
+        status_code=status.HTTP_206_PARTIAL_CONTENT
+        if byte_range
+        else status.HTTP_200_OK,
+        media_type="application/pdf",
+        headers=_preview_headers(pdf_document, metadata, content_length, byte_range),
     )
 
 
@@ -152,22 +420,6 @@ async def get_document_status(
 
     if task_state == "SUCCESS":
         result_payload = None
-        query_json = await db.execute(
-            select(FileConversionModel).where(
-                and_(
-                    FileConversionModel.file_id == document_id,
-                    FileConversionModel.converted_to_extension == "json",
-                )
-            )
-        )
-        json_records = query_json.scalars().all()
-        if json_records:
-            result_payload = []
-            for record in json_records:
-                json_path = Path(record.converted_file_path)
-                if json_path.exists():
-                    with open(json_path) as f:
-                        result_payload.append(json.load(f))
         message = "OCR processing completed successfully"
     elif task_state == "PROGRESS":
         meta = task.info or {}
@@ -233,9 +485,9 @@ async def convert_document(
         converted_metadata = await convert_to_pdf(doc_id, db)
         return FileConversionResponse(
             file_id=doc_id,
-            converted_file_path=converted_metadata.converted_file_path,
-            converted_mime_type=converted_metadata.converted_mime_type,
-            converted_to_extension=converted_metadata.converted_to_extension,
+            converted_file_path=converted_metadata.storage_key,
+            converted_mime_type=converted_metadata.mime_type,
+            converted_to_extension=converted_metadata.file_extension or "pdf",
         )
     except ValueError as e:
         raise HTTPException(

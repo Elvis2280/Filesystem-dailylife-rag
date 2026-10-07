@@ -4,7 +4,10 @@ An event-driven, orchestrated document processing pipeline with RAG-based questi
 
 ## Overview
 
-Memory RAG is a document processing system that handles OCR, translation, embedding, and retrieval. It uses an event-driven architecture with Celery workers to process documents asynchronously, storing embeddings in Qdrant (vector DB) and Redis.
+Memory RAG is a document processing system that handles conversion, page splitting,
+OCR, translation, embedding, and retrieval. Celery workers process documents
+asynchronously, PostgreSQL tracks every physical artifact and pipeline event,
+Garage stores the files, and Qdrant stores the embeddings.
 
 ## Tech Stack
 
@@ -12,6 +15,8 @@ Memory RAG is a document processing system that handles OCR, translation, embedd
 |-----------|------------|
 | API Framework | FastAPI |
 | Task Queue | Celery + Redis |
+| Relational Database | PostgreSQL |
+| Object Storage | Garage (S3-compatible) |
 | Vector Database | Qdrant |
 | Caching/Sessions | Redis |
 | OCR | GLM OCR |
@@ -23,17 +28,24 @@ Memory RAG is a document processing system that handles OCR, translation, embedd
 ### Document Processing Pipeline
 
 ```
-User Upload → API Endpoint → Celery Task: save_file
-    → Task: ocr_task → Task: translate_task → Task: embed_task
-    → Index to Qdrant + Redis
+User Upload → Garage original object + Document row + DocumentEvents
+    → Optional converted PDF Document → DocumentSplits (PNG objects)
+    → OCR text per split → EN/JP Translation rows and objects
+    → Embedding and Qdrant indexing
 ```
 
-1. **Upload**: User submits document via REST API
-2. **Save File**: File is stored in local storage, metadata saved to Redis
-3. **OCR**: GLM OCR extracts text from document
-4. **Translation**: Translated document (if needed)
-5. **Embedding**: BGE-M3 generates embeddings
-6. **Index**: Embeddings stored in Qdrant + Redis
+1. **Upload**: the API streams a temporary copy, computes SHA-256, rejects a
+   duplicate original within the workspace, and stores the original in Garage.
+2. **Format**: convertible originals keep their own object and receive a child
+   `converted_pdf` document. Original PDFs are processed without duplication.
+3. **Split**: every PDF page becomes a Garage PNG and a `document_splits` row.
+   Original images are registered as a split without copying their object.
+4. **OCR and translation**: OCR, Markdown, and EN/JP results are stored in
+   Garage and linked through the split and workspace.
+5. **Index**: embeddings use the root document ID in Qdrant payloads.
+
+Every stage records a `document_events` row. Durable file paths in PostgreSQL
+are Garage object keys, never host absolute paths.
 
 ### Query Flow
 
@@ -84,9 +96,7 @@ memory-rag/
 │   ├── tasks/               # Core pipeline tasks
 │   ├── celery_app.py        # Celery configuration
 │   └── worker.py            # Worker entry point
-├── brain/                   # Bilingual document storage
-│   ├── english/             # English documents
-│   └── japanese/            # Japanese documents
+├── docker/garage/           # Garage single-node configuration
 ├── tests/                   # Test suite
 │   ├── unit/                # Unit tests
 │   └── integration/         # Integration tests
@@ -99,7 +109,8 @@ memory-rag/
 └── README.md                # This file
 ```
 
-**Note:** The `storage/` directory is a named Docker volume (not in the repo). It is auto-created by Docker Compose at runtime.
+**Note:** Durable files live in the `garage_meta` and `garage_data` Docker
+volumes. `temp_storage/` is disposable pipeline scratch space.
 
 ## Component Descriptions
 
@@ -142,6 +153,8 @@ Application-wide settings: config management, logging setup, constants.
 - Python 3.12+
 - Redis server
 - Qdrant server
+- PostgreSQL server
+- Garage server
 - Docker & Docker Compose (optional)
 
 ### Setup (Local Dev)
@@ -151,20 +164,27 @@ Application-wide settings: config management, logging setup, constants.
    ```bash
    pip install -r requirements.txt
    ```
-3. Create a `.env` file in the project root with overrides (optional):
+3. Copy `.env.example` to `.env` and replace the Garage secrets outside local
+   development:
    ```env
    IS_DEVELOPMENT=true
+   GARAGE_RPC_SECRET=<64 hexadecimal characters>
+   GARAGE_ACCESS_KEY=<Garage access key>
+   GARAGE_SECRET_KEY=<Garage secret key>
+   GARAGE_BUCKET=memory-rag
    ```
    > For **local development without Docker**, override service hosts:
    > ```env
    > REDIS_HOST=localhost
    > QDRANT_HOST=localhost
    > POSTGRES_HOST=localhost
+   > GARAGE_HOST=localhost
+   > OBJECT_STORAGE_ENDPOINT=http://localhost:3900
    > ```
    > In Docker, the default service names (`redis`, `qdrant`, `postgres`) work automatically.
 4. Start services:
    ```bash
-   docker-compose up -d  # Redis, Qdrant
+   docker compose up -d  # PostgreSQL, Redis, Qdrant, Garage, API and workers
    ```
 5. Run the API:
    ```bash
@@ -204,6 +224,8 @@ API available at:
 - `http://localhost:8080/docs` (Swagger UI)
 - `http://localhost:8080/redoc` (ReDoc)
 - `http://localhost:5555` (Flower dashboard)
+- `http://localhost:3900` (Garage S3 API)
+- `http://localhost:3903/health` (Garage administration health)
 
 ### Production Mode
 
@@ -225,7 +247,7 @@ For the remote Tauri Dev Testing environment, deploy the dedicated
 [`COOLIFY_DEV_TESTING.md`](COOLIFY_DEV_TESTING.md). It uses Coolify HTTPS for
 the API, internal service networking, named persistent volumes, remote Ollama,
 automatic migrations, and model validation. The local development Compose file
-remains unchanged.
+keeps its hot-reload workflow while using the same Garage-backed storage model.
 
 Set `OLLAMA_BASE_URL` in the Coolify environment to the full Ollama URL, for
 example `https://ollama.tail1e26db.ts.net`. When it is unset, the app uses
@@ -237,7 +259,7 @@ example `https://ollama.tail1e26db.ts.net`. When it is unset, the app uses
 |--|-----|------|
 | Nginx port | `8080` | `80` |
 | API reload | ✅ `--reload` | ❌ Dockerfile CMD |
-| Brain storage | Bind mount `./brain` | Named volume `brain_data` |
+| Object storage | Garage named volumes | Garage named volumes |
 | Tests mount | ✅ `./tests` | ❌ |
 | Flower UI | ✅ | ❌ |
 | API memory limit | 512M | 1G |
@@ -333,6 +355,19 @@ docker-compose up -d
 # 2. Apply all pending migrations
 docker-compose exec api alembic upgrade head
 ```
+
+#### Clean Development Reset
+
+The current schema is a clean baseline. To permanently reset PostgreSQL,
+Garage objects, local scratch data, and the `documents` Qdrant collection while
+preserving Redis, the Garage bucket itself, and other Qdrant collections, run
+this command from the project root:
+
+```bash
+docker compose run --rm --no-deps api python reset_project_data.py --confirm-clean-reset
+```
+
+This is destructive and intended for a deliberate development reset only.
 
 ### API Endpoints
 

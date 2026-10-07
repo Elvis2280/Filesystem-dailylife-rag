@@ -1,0 +1,13 @@
+# Ignore heavy or temporary data folders
+temp_storage/
+brain/
+tests/
+alembic/
+.github/
+
+# Standard Python / system ignores
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/

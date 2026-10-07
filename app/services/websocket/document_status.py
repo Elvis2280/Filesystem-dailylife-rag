@@ -32,7 +32,7 @@ def _parse_step_number(step: str | int | None) -> int | None:
 async def _get_current_state(document_id: str) -> dict | None:
     """Read the document's latest state from the DB (async).
 
-    Returns the most recent ``document_history`` row ordered by
+    Returns the most recent ``document_events`` row ordered by
     ``created_at DESC``, or a fallback dict built from the ``documents``
     table if no history exists yet, or ``None`` if the document itself
     is not found.
@@ -40,7 +40,7 @@ async def _get_current_state(document_id: str) -> dict | None:
     from sqlalchemy import select
 
     from app.models.document import Document
-    from app.models.document_history import DocumentHistoryModel
+    from app.models.document_event import DocumentEventModel
     from app.models.workspace import WorkspaceModel
 
     doc_uuid = UUID(document_id)
@@ -56,9 +56,9 @@ async def _get_current_state(document_id: str) -> dict | None:
         document, workspace_name = document_row
 
         history_result = await db.execute(
-            select(DocumentHistoryModel)
-            .where(DocumentHistoryModel.document_id == doc_uuid)
-            .order_by(DocumentHistoryModel.created_at.desc())
+            select(DocumentEventModel)
+            .where(DocumentEventModel.document_id == doc_uuid)
+            .order_by(DocumentEventModel.created_at.desc())
             .limit(1)
         )
         history = history_result.scalar_one_or_none()

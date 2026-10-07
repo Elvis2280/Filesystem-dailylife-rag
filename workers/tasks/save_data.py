@@ -1,21 +1,23 @@
 import json
 import logging
 from datetime import datetime
-from pathlib import Path
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.core.constant import FilePipelineStage, FileStatus
 from app.core.database import get_sync_db
 from app.core.redis_client import redis_client
 from app.models.document import Document
-from app.models.document_history import DocumentHistoryModel
+from app.models.document_event import DocumentEventModel
+from app.models.document_split import DocumentSplitModel
+from app.models.translation import TranslationModel
 from app.models.workspace import WorkspaceModel
 from app.services.format.cleaner_llm import clean_text
 from app.services.rag.embedding import embedding
 from app.services.rag.qdrant_client import upsert_embeddings
+from app.services.storage.object_storage import get_text
 from workers.celery_app import celery_app
 
 logger = logging.getLogger("memory_rag.save_data")
@@ -58,8 +60,12 @@ def _publish_status(
         )
 
     if db_session is not None:
-        history = DocumentHistoryModel(
+        document = db_session.query(Document).filter_by(id=document_id).first()
+        if document is None:
+            return
+        history = DocumentEventModel(
             document_id=document_id,
+            workspace_id=document.workspace_id,
             status=status,
             stage=stage.value,
             step=stage.step,
@@ -71,11 +77,11 @@ def _publish_status(
         db_session.commit()
 
 
-def _read_text(path: Path, label: str) -> str:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing {label}: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+def _read_text(object_key: str, label: str) -> str:
+    try:
+        return get_text(object_key)
+    except Exception as exc:
+        raise FileNotFoundError(f"Missing {label}: {object_key}") from exc
 
 
 def _set_status(
@@ -87,22 +93,44 @@ def _set_status(
     db_session.commit()
 
 
-def _page_file_paths(
-    document_id: str, workspace_id: str, page: int
-) -> tuple[Path, Path, Path]:
-    ocr_path = (
-        Path(settings.workspace_subdir(workspace_id, "files"))
-        / f"{document_id}_OCR_page_{page:03d}.txt"
+def _page_object_keys(
+    document_id: str, page: int, db_session: Session
+) -> tuple[str, str, str]:
+    split = db_session.execute(
+        select(DocumentSplitModel)
+        .join(Document, Document.id == DocumentSplitModel.document_id)
+        .where(
+            DocumentSplitModel.page_number == page,
+            or_(
+                DocumentSplitModel.document_id == document_id,
+                and_(
+                    Document.parent_document_id == document_id,
+                    Document.file_role == "converted_pdf",
+                ),
+            ),
+        )
+    ).scalar_one_or_none()
+    if split is None or not split.ocr_storage_key:
+        raise FileNotFoundError(f"Missing persisted split/OCR record for page {page}")
+
+    translations = (
+        db_session.execute(
+            select(TranslationModel).where(
+                TranslationModel.document_split_id == split.id,
+                TranslationModel.language.in_(("EN", "JP")),
+            )
+        )
+        .scalars()
+        .all()
     )
-    english_path = (
-        Path(settings.workspace_subdir(workspace_id, "translation/english"))
-        / f"{document_id}_page_{page:03d}.md"
+    by_language = {translation.language: translation for translation in translations}
+    if "EN" not in by_language or "JP" not in by_language:
+        raise FileNotFoundError(f"Missing translations for page {page}")
+    return (
+        split.ocr_storage_key,
+        by_language["EN"].storage_key,
+        by_language["JP"].storage_key,
     )
-    japanese_path = (
-        Path(settings.workspace_subdir(workspace_id, "translation/japanese"))
-        / f"{document_id}_page_{page:03d}.md"
-    )
-    return ocr_path, english_path, japanese_path
 
 
 def _chunk_english(text: str) -> list[str]:
@@ -132,6 +160,7 @@ def process_save_data(self, document_id: str) -> None:
     disk and surfaced to the next stage (embedding + Qdrant indexing).
     """
     db_session: Session | None = None
+    document: Document | None = None
     original_filename = ""
     workspace_name = ""
     try:
@@ -139,6 +168,10 @@ def process_save_data(self, document_id: str) -> None:
             document = db_session.query(Document).filter_by(id=document_id).first()
             if not document:
                 raise ValueError(f"No document with ID {document_id}")
+
+            document.attempt_count += 1
+            document.last_error = None
+            db_session.commit()
 
             original_filename = document.original_filename
             workspace = (
@@ -200,13 +233,13 @@ def process_save_data(self, document_id: str) -> None:
                     db_session=db_session,
                 )
 
-                ocr_path, english_path, japanese_path = _page_file_paths(
-                    document_id, workspace_id, page
+                ocr_key, english_key, japanese_key = _page_object_keys(
+                    document_id, page, db_session
                 )
 
-                raw_text = _read_text(ocr_path, f"OCR page {page}")
-                english_markdown = _read_text(english_path, f"English page {page}")
-                japanese_markdown = _read_text(japanese_path, f"Japanese page {page}")
+                raw_text = _read_text(ocr_key, f"OCR page {page}")
+                english_markdown = _read_text(english_key, f"English page {page}")
+                japanese_markdown = _read_text(japanese_key, f"Japanese page {page}")
 
                 publish_status(
                     document_id,
@@ -300,6 +333,10 @@ def process_save_data(self, document_id: str) -> None:
             )
 
     except Exception as e:
+        if document is not None and db_session is not None:
+            document.status = FileStatus.FAILED.value
+            document.last_error = str(e)
+            db_session.commit()
         _publish_status(
             document_id,
             FilePipelineStage.FAILED,

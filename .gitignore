@@ -77,6 +77,7 @@ Thumbs.db
 # Environment variables (secrets)
 .env
 .env.*
+!.env.example
 
 # User data
 storage/uploads/*

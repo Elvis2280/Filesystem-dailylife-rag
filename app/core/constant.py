@@ -1,9 +1,5 @@
 from enum import Enum
 
-# --- Workspace Configuration ---
-
-WORKSPACE_BASE_PATH = "./brain"
-
 
 class WorkspaceStatus(str, Enum):
     ACTIVE = "active"
@@ -25,11 +21,13 @@ class FileStatus(str, Enum):
 
 # --- File Pipeline Stages ---
 
-PIPELINE_STEP_TOTAL = 12
+PIPELINE_STEP_TOTAL = 13
 
 
 class FilePipelineStage(str, Enum):
     PENDING = "pending"
+    UPLOAD = "upload"
+    OBJECT_STORAGE = "object_storage"
     PDF_CONVERSION = "pdf_conversion"
     IMAGE_CONVERSION = "image_conversion"
     OCR_PROCESSING = "ocr_processing"
@@ -48,25 +46,27 @@ class FilePipelineStage(str, Enum):
     def step_number(self) -> int:
         _steps = {
             "pending": 0,
-            "pdf_conversion": 1,
-            "image_conversion": 2,
-            "ocr_processing": 3,
-            "language_detection": 4,
-            "translation": 5,
+            "upload": 0,
+            "object_storage": 1,
+            "pdf_conversion": 2,
+            "image_conversion": 3,
+            "ocr_processing": 4,
+            "language_detection": 5,
             "creating_markdown_files": 6,
-            "file_process_finished": 7,
-            "verify_files": 8,
-            "collecting_data": 9,
-            "preparing_data": 10,
-            "saving_data": 11,
-            "completed": 12,
+            "translation": 7,
+            "file_process_finished": 8,
+            "verify_files": 9,
+            "collecting_data": 10,
+            "preparing_data": 11,
+            "saving_data": 12,
+            "completed": 13,
             "failed": 0,
         }
         return _steps[self.value]
 
     @property
     def step(self) -> str:
-        """Return the legacy fraction stored in document history."""
+        """Return the progress fraction stored in document events."""
         return f"{self.step_number}/{PIPELINE_STEP_TOTAL}"
 
     @property
@@ -78,6 +78,8 @@ class FilePipelineStage(str, Enum):
     def message(self) -> str:
         _messages = {
             "pending": "Waiting for task to start...",
+            "upload": "Receiving uploaded file...",
+            "object_storage": "Saving file to object storage...",
             "pdf_conversion": "Converting document to PDF...",
             "image_conversion": "Converting PDF to images...",
             "ocr_processing": "Running OCR...",
@@ -160,11 +162,3 @@ class LanguageOptions(str, Enum):
     ENGLISH = "EN"
     JAPANESE = "JP"
     MIXED = "MIXED"
-
-
-class DocumentsType(str, Enum):
-    ORIGINAL_FILE = "ORIGINAL"
-    CONVERTED_PDF = "CONVERT_PDF"
-    IMAGES_PAGES = "IMAGES_PAGES"
-    MD_ORIGINAL = "MD_ORIGINAL"
-    MD_TRANSLATED = "MD_TRANSLATED"

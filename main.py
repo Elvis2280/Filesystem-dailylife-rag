@@ -14,12 +14,12 @@ Architecture:
                            ▼                       ▼
                     ┌──────────────┐     ┌──────────────────┐
                     │   Services   │     │  Storage Layers  │
-                    │  (app/services)    │ Redis/Qdrant/PG  │
+                    │  (app/services)    │Garage/Redis/Qdrant/PG│
                     └──────────────┘     └──────────────────┘
 
 Startup Validation:
     On startup, verifies all external services are reachable
-    (Redis, Qdrant, Postgres, Ollama) and required directories exist.
+    (Redis, Garage, Qdrant, Postgres, Ollama) and required directories exist.
     Raises RuntimeError if any critical dependency is missing.
 """
 
@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
     """Handle startup & shutdown lifecycle for the application.
 
     Startup:
-        Validates all external services (Redis, Qdrant, Postgres, Ollama)
+        Validates all external services (Redis, Garage, Qdrant, Postgres, Ollama)
         and required directories. Raises RuntimeError if any critical
         dependency is missing.
 
@@ -76,6 +76,13 @@ async def lifespan(app: FastAPI):
     else:
         logger.error("Postgres DB: connection failed")
         errors.append("Postgres DB connection failed")
+
+    # --- Garage Bucket Check ---
+    if report.get("object_storage"):
+        logger.info("Garage bucket '%s': available", settings.OBJECT_STORAGE_BUCKET)
+    else:
+        logger.error("Garage bucket '%s': unavailable", settings.OBJECT_STORAGE_BUCKET)
+        errors.append("Garage object storage bucket is unavailable")
 
     # --- Ollama Model Availability Check ---
     from app.services.ai.ollama_client import OllamaClient
@@ -189,6 +196,14 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "Accept-Ranges",
+        "Content-Range",
+        "Content-Length",
+        "Content-Disposition",
+        "ETag",
+        "Last-Modified",
+    ],
 )
 
 # Register ollama routes only in dev mode

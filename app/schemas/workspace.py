@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Union
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -27,38 +26,60 @@ class DisableWorkspaceResponse(BaseModel):
     message: str
 
 
-class FileNode(BaseModel):
-    type: str = "file"
+class WorkspaceArtifactFile(BaseModel):
     id: str
     name: str
-    original_name: str | None = None
-    document_id: str | None = None
-    kind: str | None = None
-    language: str | None = None
-    page_number: int | None = None
-    mime_type: str | None = None
+    file_role: str
+    path: str
+    status: str
+    mime_type: str
     created_at: datetime | None = None
 
 
-class FolderNode(BaseModel):
-    type: str = "folder"
+class WorkspaceTranslationFile(BaseModel):
     id: str
     name: str
-    path: str | None = None
-    children: list[Union["FileNode", "FolderNode"]] = []
-    original_name: str | None = None
-    status: str | None = None
+    language: str
+    page_number: int
+    path: str
+    status: str
+    mime_type: str
+    created_at: datetime | None = None
+
+
+class WorkspaceTranslations(BaseModel):
+    japanese: list[WorkspaceTranslationFile] = Field(default_factory=list)
+    english: list[WorkspaceTranslationFile] = Field(default_factory=list)
+
+
+class WorkspacePageImage(BaseModel):
+    id: str
+    name: str
+    document_id: str
+    page_number: int
+    path: str
+    status: str
+    mime_type: str
+
+
+class WorkspaceFileNode(BaseModel):
+    id: str
+    name: str
+    status: str
     language: str | None = None
-    mime_type: str | None = None
+    mime_type: str
     page_count: int | None = None
     created_at: datetime | None = None
+    original_files: list[WorkspaceArtifactFile] = Field(default_factory=list)
+    translations: WorkspaceTranslations = Field(default_factory=WorkspaceTranslations)
+    pages: list[WorkspacePageImage] = Field(default_factory=list)
 
 
 class WorkspaceTreeNode(BaseModel):
     id: str
     name: str
     status: str
-    children: list[FolderNode] = []
+    files: list[WorkspaceFileNode] = Field(default_factory=list)
 
 
 class WorkspaceTreeResponse(BaseModel):
