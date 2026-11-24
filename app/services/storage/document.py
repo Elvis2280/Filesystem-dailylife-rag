@@ -6,12 +6,11 @@ import asyncio
 import shutil
 import tempfile
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 import fitz
 from fastapi import UploadFile
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -109,6 +108,7 @@ async def process_document_upload(
             document_id,
             stored_filename,
         )
+        upload_received_at = await db.scalar(select(func.clock_timestamp()))
         await asyncio.to_thread(put_file, file_path, object_key, mime_type)
 
     document = Document(
@@ -135,7 +135,7 @@ async def process_document_upload(
                 stage=FilePipelineStage.UPLOAD.value,
                 step=FilePipelineStage.UPLOAD.step,
                 message="File received by the upload endpoint",
-                created_at=datetime.now(timezone.utc),
+                created_at=upload_received_at,
             ),
             DocumentEventModel(
                 document_id=document_id,
@@ -144,7 +144,6 @@ async def process_document_upload(
                 stage=FilePipelineStage.OBJECT_STORAGE.value,
                 step=FilePipelineStage.OBJECT_STORAGE.step,
                 message="Original file persisted in Garage",
-                created_at=datetime.now(timezone.utc),
             ),
         ]
     )

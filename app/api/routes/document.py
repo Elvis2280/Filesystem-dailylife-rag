@@ -5,7 +5,7 @@ import tempfile
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import timezone
 from email.utils import format_datetime
 from pathlib import Path, PurePath
 from urllib.parse import quote
@@ -25,7 +25,7 @@ from fastapi import (
 )
 from fastapi.responses import Response, StreamingResponse
 from redis.exceptions import RedisError
-from sqlalchemy import select, tuple_, update
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.api_key import is_api_key_valid
@@ -519,6 +519,7 @@ async def replace_document(
             object_key = original_document_key(
                 document.workspace_id, document.id, stored_filename
             )
+            upload_received_at = await db.scalar(select(func.clock_timestamp()))
             await asyncio.to_thread(
                 put_file,
                 source_path,
@@ -565,6 +566,7 @@ async def replace_document(
                         stage=FilePipelineStage.UPLOAD.value,
                         step=FilePipelineStage.UPLOAD.step,
                         message="Replacement file received",
+                        created_at=upload_received_at,
                     )
                 )
                 await db.commit()
@@ -910,7 +912,6 @@ async def retry_document(
                 ),
                 page_number=latest_event.page_number if latest_event else None,
                 total_pages=document.page_count,
-                created_at=datetime.now(timezone.utc),
             )
         )
 
@@ -952,7 +953,6 @@ async def retry_document(
             stage=FilePipelineStage.PENDING.value,
             step=FilePipelineStage.PENDING.step,
             message="Retry queued. Checking saved progress before resuming.",
-            created_at=datetime.now(timezone.utc),
         )
     )
     try:

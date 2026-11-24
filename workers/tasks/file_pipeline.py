@@ -1,7 +1,6 @@
 import json
 import logging
 import tempfile
-from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -9,7 +8,6 @@ from typing import Iterator
 from uuid import UUID
 
 from celery import Task
-from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -26,11 +24,7 @@ from app.models.document_event import DocumentEventModel
 from app.models.document_split import DocumentSplitModel
 from app.models.workspace import WorkspaceModel
 from app.services.format.format import format_all_markdown
-from app.services.ocr.file_ocr_llm import (
-    NATIVE_OCR_PROMPT,
-    extract_image_text,
-    is_glm_ocr_model_selected,
-)
+from app.services.ocr.file_ocr_llm import extract_image_text
 from app.services.storage.document_sync import (
     convert_to_images,
     convert_to_pdf,
@@ -54,85 +48,6 @@ def document_worker_lock(document_id: str) -> Iterator[None]:
         finally:
             lock_connection.scalar(select(func.pg_advisory_unlock(key)))
             lock_connection.commit()
-
-
-def _extract_page_text(
-    image_path: str | Path,
-    document_id: str,
-    page_number: int,
-    on_retry: Callable[[], None],
-) -> str:
-    """Try OCR twice, preserving the reason for the final failed attempt."""
-    last_error: Exception | None = None
-    reason = "OCR returned empty or whitespace-only text"
-    retry_prompt: str | None = None
-    retry_image_path = Path(image_path)
-    retry_num_predict = 8192
-    for attempt in (1, 2):
-        try:
-            text = extract_image_text(
-                retry_image_path,
-                document_id=document_id,
-                page_number=page_number,
-                attempt=attempt,
-                prompt=retry_prompt,
-                num_predict=retry_num_predict,
-            )
-        except Exception as exc:
-            last_error = exc
-            reason = str(exc)
-            if attempt == 1 and "token repeat limit reached" in reason.casefold():
-                try:
-                    if is_glm_ocr_model_selected():
-                        retry_prompt = NATIVE_OCR_PROMPT
-                        retry_num_predict = 2048
-                        fallback_image_path = Path(image_path).with_name(
-                            f"{Path(image_path).stem}-ocr-retry.png"
-                        )
-                        with Image.open(image_path) as page_image:
-                            retry_image = page_image.convert("RGB")
-                            retry_image.thumbnail(
-                                (1600, 1600), Image.Resampling.LANCZOS
-                            )
-                            retry_image.save(fallback_image_path, format="PNG")
-                        retry_image_path = fallback_image_path
-                        logging.getLogger("memory_rag.pipeline").info(
-                            "Retrying OCR with GLM-OCR fallback "
-                            "document=%s page=%d image=%s dimensions=%s "
-                            "num_predict=%d reason=token_repeat_limit",
-                            document_id,
-                            page_number,
-                            retry_image_path,
-                            retry_image.size,
-                            retry_num_predict,
-                        )
-                except Exception:
-                    logging.getLogger("memory_rag.pipeline").exception(
-                        "Could not check OCR model before prompt fallback "
-                        "document=%s page=%d",
-                        document_id,
-                        page_number,
-                    )
-        else:
-            if text.strip():
-                return text
-            last_error = None
-            reason = "OCR returned empty or whitespace-only text"
-
-        if attempt < 2:
-            logging.getLogger("memory_rag.pipeline").info(
-                "Retrying OCR document=%s page=%d attempt=%d/2 reason=%s",
-                document_id,
-                page_number,
-                attempt + 1,
-                reason,
-            )
-            on_retry()
-
-    raise RuntimeError(
-        f"OCR failed for page {page_number} of document {document_id} "
-        f"after {attempt} attempts: {reason}"
-    ) from last_error
 
 
 def _publish_status(
@@ -429,8 +344,11 @@ def _run_file_pipeline(
                             page,
                         )
 
-                    text = _extract_page_text(
-                        image_path, document_id, page, publish_retry
+                    text = extract_image_text(
+                        image_path,
+                        document_id=document_id,
+                        page_number=page,
+                        on_retry=publish_retry,
                     )
                     save_ocr_page(
                         str(source.id),

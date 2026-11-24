@@ -1,7 +1,6 @@
 """Ollama status, installed models, and server-wide model preferences."""
 
 import asyncio
-import base64
 from typing import Any
 
 import httpx
@@ -28,7 +27,7 @@ from app.services.ai.model_preferences import (
 )
 from app.services.ai.ollama_client import OllamaClient, get_ollama_client
 from app.services.ai.model_names import model_is_available
-from app.services.ocr.file_ocr_llm import extract_image_text_async
+from app.services.ocr.file_ocr_llm import extract_image_text
 
 router = APIRouter(prefix="/ollama", tags=["Ollama"])
 dev_router = APIRouter(prefix="/ollama", tags=["Ollama"])
@@ -303,11 +302,12 @@ async def ollama_ocr(
 
     validate_image_type(file)
     file_received = await file.read()
-    image_base64 = base64.b64encode(file_received).decode("utf-8")
 
     try:
         model_name = await get_model_name_async(ModelRole.OCR)
-        ocr_result = await extract_image_text_async(image_base64, model_name)
+        ocr_result = await asyncio.to_thread(
+            extract_image_text, file_received, model_name=model_name
+        )
         return OllamaFileOcrResponse(
             file_text=ocr_result,
             ollama_model=model_name,

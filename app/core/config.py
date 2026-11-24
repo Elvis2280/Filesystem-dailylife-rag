@@ -98,12 +98,22 @@ class Settings(BaseSettings):
     OLLAMA_HOST: str = "localhost"
     OLLAMA_PORT: int = 11434
     OLLAMA_MODEL_OCR: str = "glm-ocr:latest"
+    OLLAMA_OCR_NUM_CTX: int = Field(default=16384, gt=0)
+    OLLAMA_OCR_NUM_PREDICT: int = Field(default=8192, gt=0)
     OLLAMA_MODEL_FORMAT: str = "qwen3.5:9b"
     OLLAMA_MODEL_TRANSLATION: str = "qwen3.5:27b"
     OLLAMA_MODEL_CLEANER: str = "qwen3.5:9b"
     OLLAMA_MODEL_EMBEDDING: str = "bge-m3:latest"
     OLLAMA_MODEL_AGENT: str = "qwen3.5:9b"
     OLLAMA_TIMEOUT: int = 600
+
+    @model_validator(mode="after")
+    def _validate_ocr_token_budget(self) -> "Settings":
+        if self.OLLAMA_OCR_NUM_PREDICT >= self.OLLAMA_OCR_NUM_CTX:
+            raise ValueError(
+                "OLLAMA_OCR_NUM_PREDICT must be less than OLLAMA_OCR_NUM_CTX"
+            )
+        return self
 
     @field_validator("OLLAMA_BASE_URL", mode="before")
     @classmethod

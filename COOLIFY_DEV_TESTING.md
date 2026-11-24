@@ -122,6 +122,9 @@ CORS_ORIGINS=tauri://localhost,http://tauri.localhost
 POSTGRES_USER=memoryrag
 POSTGRES_DB=memoryrag
 OLLAMA_MODEL_OCR=glm-ocr:latest
+# Optional OCR overrides. These are also the Compose defaults.
+# OLLAMA_OCR_NUM_CTX=16384
+# OLLAMA_OCR_NUM_PREDICT=8192
 OLLAMA_MODEL_FORMAT=qwen3.5:9b
 OLLAMA_MODEL_TRANSLATION=qwen3.5:27b
 OLLAMA_MODEL_CLEANER=qwen3.5:9b

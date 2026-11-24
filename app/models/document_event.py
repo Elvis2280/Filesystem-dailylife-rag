@@ -51,7 +51,7 @@ class DocumentEventModel(Base):
     page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_pages: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        DateTime(timezone=True), server_default=func.clock_timestamp(), nullable=False
     )
 
     workspace: Mapped[WorkspaceModel] = relationship(
