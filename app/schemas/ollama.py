@@ -1,8 +1,22 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class OllamaModelInfo(BaseModel):
+    name: str
+    size: int | None = None
+    digest: str | None = None
+    modified_at: str | None = None
+    family: str | None = None
+    parameter_size: str | None = None
+    quantization_level: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    eligible_roles: list[str] = Field(default_factory=list)
+    selected_roles: list[str] = Field(default_factory=list)
+    recommended_roles: list[str] = Field(default_factory=list)
 
 
 class OllamaStatusResponse(BaseModel):
-    """Response schema for Ollama health check."""
+    """Ollama connectivity and installed model metadata."""
 
     is_reachable: bool = Field(
         ..., description="Whether the Ollama service is reachable"
@@ -10,6 +24,32 @@ class OllamaStatusResponse(BaseModel):
     available_models: list[str] = Field(
         ..., description="List of available Ollama models if reachable"
     )
+    models: list[OllamaModelInfo] = Field(
+        default_factory=list,
+        description="Installed models with metadata and eligible roles",
+    )
+    selected_models: dict[str, str] = Field(
+        default_factory=dict,
+        description="Current model selection for each server role",
+    )
+
+
+class OllamaPreferencesResponse(BaseModel):
+    ocr: str
+    translation: str
+    embedding: str
+    answer: str
+    formatting: str
+    cleaning: str
+    editable_roles: list[str] = Field(default_factory=list)
+
+
+class OllamaPreferencesUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ocr: str | None = None
+    translation: str | None = None
+    answer: str | None = None
 
 
 class OllamaFileOcrResponse(BaseModel):

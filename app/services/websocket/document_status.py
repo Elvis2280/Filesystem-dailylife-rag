@@ -7,14 +7,19 @@ or fails.
 
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from uuid import UUID
 
 from app.core.constant import FileStatus, PIPELINE_STEP_TOTAL
 from app.core.database import async_session
 from app.core.redis_client import get_async_redis_client
-from app.core.websocket_manager import manager
+from app.services.document_status import (
+    document_failure_message,
+    resolve_document_status,
+)
 
 logger = logging.getLogger("memory_rag.ws.document_status")
+TERMINAL_STATUSES = {FileStatus.COMPLETED.value, FileStatus.FAILED.value}
 
 
 def _parse_step_number(step: str | int | None) -> int | None:
@@ -58,19 +63,31 @@ async def _get_current_state(document_id: str) -> dict | None:
         history_result = await db.execute(
             select(DocumentEventModel)
             .where(DocumentEventModel.document_id == doc_uuid)
-            .order_by(DocumentEventModel.created_at.desc())
+            .order_by(
+                DocumentEventModel.created_at.desc(), DocumentEventModel.id.desc()
+            )
             .limit(1)
         )
         history = history_result.scalar_one_or_none()
+        effective_status, worker_stopped = await resolve_document_status(
+            db, document, history
+        )
+        message = (
+            history.message
+            if history and history.message
+            else "Document is being processed"
+        )
+        if effective_status == FileStatus.FAILED.value:
+            message = document_failure_message(document, history, worker_stopped)
 
         if history is not None:
             return {
                 "type": "current_state",
-                "status": history.status,
+                "status": effective_status,
                 "stage": history.stage,
                 "step": _parse_step_number(history.step),
                 "stepTotal": PIPELINE_STEP_TOTAL,
-                "message": history.message,
+                "message": message,
                 "document_id": document_id,
                 "original_filename": document.original_filename,
                 "workspace_name": workspace_name,
@@ -84,11 +101,11 @@ async def _get_current_state(document_id: str) -> dict | None:
         # No history yet — fall back to document's current status
         return {
             "type": "current_state",
-            "status": document.status or "",
+            "status": effective_status or "",
             "stage": None,
             "step": None,
             "stepTotal": PIPELINE_STEP_TOTAL,
-            "message": "Pending",
+            "message": message,
             "document_id": document_id,
             "original_filename": document.original_filename,
             "workspace_name": workspace_name,
@@ -100,55 +117,45 @@ async def _get_current_state(document_id: str) -> dict | None:
         }
 
 
-async def _send_current_state(document_id: str) -> dict | None:
-    """Fetch the latest state from the DB and send it to the WebSocket."""
-    state = await _get_current_state(document_id)
-    if state is not None:
-        await manager.send_message(document_id, state)
-    return state
-
-
-async def stream_document_status(document_id: str) -> None:
-    # Send current state first so the client immediately knows the document status
-    current_state = None
-    try:
-        current_state = await _send_current_state(document_id)
-    except Exception:
-        logger.exception("Failed to send current state for %s", document_id)
-
-    # If the document is already in a terminal state, close immediately
-    if current_state is not None and current_state.get("status") in (
-        FileStatus.COMPLETED.value,
-        FileStatus.FAILED.value,
-    ):
-        return
-
+async def stream_document_status(
+    document_id: str, send: Callable[[dict], Awaitable[None]]
+) -> None:
     redis_async = await get_async_redis_client()
-    pubsub = redis_async.pubsub()
-    await pubsub.subscribe(f"document_updates:{document_id}")
-    try:
+    async with redis_async.pubsub() as pubsub:
+        # Subscribe first so a fast retry cannot finish between the snapshot and subscription.
+        await pubsub.subscribe(f"document_updates:{document_id}")
+        current_state = await _get_current_state(document_id)
+        if current_state is None:
+            return
+        await send(current_state)
+        if current_state.get("status") in TERMINAL_STATUSES:
+            return
+
         while True:
             message = await pubsub.get_message(
                 ignore_subscribe_messages=True, timeout=30.0
             )
             if message is None:
                 try:
-                    await manager.send_message(document_id, {"type": "ping"})
+                    current_state = await _get_current_state(document_id)
+                    if (
+                        current_state
+                        and current_state.get("status") in TERMINAL_STATUSES
+                    ):
+                        await send(current_state)
+                        break
+                    await send({"type": "ping"})
                 except Exception:
                     break
                 continue
             if message["type"] != "message":
                 continue
             data = json.loads(message["data"])
-            await manager.send_message(document_id, data)
-            if data.get("status") in (
-                FileStatus.COMPLETED.value,
-                FileStatus.FAILED.value,
-            ):
-                break
-    finally:
-        try:
-            await pubsub.unsubscribe(f"document_updates:{document_id}")
-            await pubsub.close()
-        except Exception:
-            pass
+            if data.get("status") in TERMINAL_STATUSES:
+                # A delayed terminal notification must not close a newer retry's stream.
+                current_state = await _get_current_state(document_id)
+                if current_state and current_state.get("status") in TERMINAL_STATUSES:
+                    await send(current_state)
+                    break
+                continue
+            await send(data)

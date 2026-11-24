@@ -64,6 +64,7 @@ class OllamaClient:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.get(f"{self.base_url}/api/tags")
+                response.raise_for_status()
                 list_models = response.json().get("models", [])
                 return OllamaStatusResponse(
                     is_reachable=True,
@@ -74,6 +75,27 @@ class OllamaClient:
                     is_reachable=False,
                     available_models=[],
                 )
+
+    async def list_models(self) -> list[dict[str, Any]]:
+        """Return Ollama's installed model records from ``/api/tags``."""
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.get(f"{self.base_url}/api/tags")
+            response.raise_for_status()
+            records = response.json().get("models", [])
+            return [record for record in records if isinstance(record, dict)]
+
+    async def show_model(self, model: str) -> dict[str, Any]:
+        """Return capabilities and metadata for one installed model."""
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                f"{self.base_url}/api/show",
+                json={"model": model},
+            )
+            response.raise_for_status()
+            details = response.json()
+            if not isinstance(details, dict):
+                raise RuntimeError("Ollama returned invalid model details")
+            return details
 
     async def generate_async(
         self,

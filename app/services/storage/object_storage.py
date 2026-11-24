@@ -222,10 +222,15 @@ def delete_prefix(prefix: str = "") -> int:
             objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]
             if not objects:
                 continue
-            client.delete_objects(
+            response = client.delete_objects(
                 Bucket=settings.OBJECT_STORAGE_BUCKET,
-                Delete={"Objects": objects, "Quiet": True},
+                Delete={"Objects": objects, "Quiet": False},
             )
+            errors = response.get("Errors", [])
+            if errors:
+                raise ObjectStorageError(
+                    f"Failed to delete {len(errors)} objects under '{object_prefix}'"
+                )
             deleted += len(objects)
     except ClientError as exc:
         raise ObjectStorageError(

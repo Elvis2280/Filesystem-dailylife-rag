@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 
@@ -22,6 +23,7 @@ SYNC_DATABASE_URL = (
 )
 sync_engine = create_engine(SYNC_DATABASE_URL, echo=False)
 sync_session = sessionmaker(sync_engine, expire_on_commit=False)
+document_lock_engine = create_engine(SYNC_DATABASE_URL, echo=False, poolclass=NullPool)
 
 Base = declarative_base()
 

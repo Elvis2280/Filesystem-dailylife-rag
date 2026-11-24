@@ -1,7 +1,8 @@
-import json
 import logging
 import re
-from datetime import datetime
+from uuid import UUID
+
+from celery import Task
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sqlalchemy import and_, or_, select
@@ -10,9 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.constant import FilePipelineStage, FileStatus
 from app.core.config import settings
 from app.core.database import get_sync_db
-from app.core.redis_client import redis_client
 from app.models.document import Document
-from app.models.document_event import DocumentEventModel
 from app.models.document_split import DocumentSplitModel
 from app.models.translation import TranslationModel
 from app.models.workspace import WorkspaceModel
@@ -27,92 +26,35 @@ from app.services.rag.qdrant_client import (
 )
 from app.services.storage.object_storage import get_text
 from workers.celery_app import celery_app
+from workers.tasks.file_pipeline import (
+    _publish_status,
+    document_worker_lock,
+    record_pipeline_failure,
+)
 
 logger = logging.getLogger("memory_rag.save_data")
-
-
-def _publish_status(
-    document_id: str,
-    stage: FilePipelineStage,
-    original_filename: str,
-    workspace_name: str,
-    message: str | None = None,
-    page_number: int | None = None,
-    total_pages: int | None = None,
-    status: str = "PROGRESS",
-    db_session: Session | None = None,
-) -> None:
-    payload = {
-        "status": status,
-        "step": stage.step_number,
-        "stepTotal": stage.step_total,
-        "stage": stage.value,
-        "message": message or stage.message,
-        "document_id": document_id,
-        "original_filename": original_filename,
-        "workspace_name": workspace_name,
-        "page_number": page_number,
-        "total_pages": total_pages,
-        "timestamp": datetime.now().isoformat(),
-    }
-    try:
-        redis_client.publish(
-            f"document_updates:{document_id}",
-            json.dumps(payload),
-        )
-    except Exception as e:
-        logger.warning(
-            "Failed to publish status to Redis for document %s: %s",
-            document_id,
-            e,
-        )
-
-    if db_session is not None:
-        document = db_session.query(Document).filter_by(id=document_id).first()
-        if document is None:
-            return
-        history = DocumentEventModel(
-            document_id=document_id,
-            workspace_id=document.workspace_id,
-            status=status,
-            stage=stage.value,
-            step=stage.step,
-            message=message or stage.message,
-            page_number=page_number,
-            total_pages=total_pages,
-        )
-        db_session.add(history)
-        db_session.commit()
 
 
 def _read_text(object_key: str, label: str) -> str:
     try:
         return get_text(object_key)
     except Exception as exc:
-        raise FileNotFoundError(f"Missing {label}: {object_key}") from exc
-
-
-def _set_status(
-    document: Document,
-    file_status: FileStatus,
-    db_session: Session,
-) -> None:
-    document.status = file_status.value
-    db_session.commit()
+        raise RuntimeError(f"Could not read {label}: {exc}") from exc
 
 
 def _page_object_keys(
     document_id: str, page: int, db_session: Session
 ) -> tuple[str, str, str]:
+    root_id = UUID(document_id)
     split = db_session.execute(
         select(DocumentSplitModel)
         .join(Document, Document.id == DocumentSplitModel.document_id)
         .where(
             DocumentSplitModel.page_number == page,
             or_(
-                DocumentSplitModel.document_id == document_id,
+                DocumentSplitModel.document_id == root_id,
                 and_(
-                    Document.parent_document_id == document_id,
+                    Document.parent_document_id == root_id,
                     Document.file_role == "converted_pdf",
                 ),
             ),
@@ -126,6 +68,7 @@ def _page_object_keys(
             select(TranslationModel).where(
                 TranslationModel.document_split_id == split.id,
                 TranslationModel.language.in_(("EN", "JP")),
+                TranslationModel.status == "completed",
             )
         )
         .scalars()
@@ -192,20 +135,35 @@ def _chunk_english(
     default_retry_delay=60,
 )
 def process_save_data(
-    self,
+    self: Task,
     document_id: str,
     target_collections: list[str] | None = None,
     clean_source_text: bool = True,
     maintenance_reindex: bool = False,
 ) -> dict[str, int]:
-    """Read the OCR and translation files for every page of a document.
+    with document_worker_lock(document_id):
+        return run_indexing(
+            self,
+            document_id,
+            target_collections,
+            clean_source_text,
+            maintenance_reindex,
+        )
 
-    Runs after the file pipeline finishes. For each page (1..page_count)
-    the raw OCR text, English markdown and Japanese markdown are read from
-    disk and surfaced to the next stage (embedding + Qdrant indexing).
-    """
-    db_session: Session | None = None
-    document: Document | None = None
+
+def run_indexing(
+    task: Task,
+    document_id: str,
+    target_collections: list[str] | None = None,
+    clean_source_text: bool = True,
+    maintenance_reindex: bool = False,
+    *,
+    count_attempt: bool = True,
+) -> dict[str, int]:
+    """Index the saved OCR and translation artifacts for a document."""
+    current_stage = FilePipelineStage.VERIFY_FILES
+    current_page: int | None = None
+    claimed = False
     original_filename = ""
     workspace_name = ""
     indexed_pages = 0
@@ -213,14 +171,26 @@ def process_save_data(
     empty_pages = 0
     try:
         with get_sync_db() as db_session:
-            document = db_session.query(Document).filter_by(id=document_id).first()
-            if not document:
+            document = db_session.get(Document, UUID(document_id), with_for_update=True)
+            if document is None:
                 raise ValueError(f"No document with ID {document_id}")
 
+            expected = (
+                FileStatus.FILE_PROCESS_FINISHED
+                if count_attempt
+                else FileStatus.RETRY_RUNNING
+            )
+            if maintenance_reindex:
+                expected = FileStatus.COMPLETED
+            if document.status != expected.value:
+                return {"indexed_pages": 0, "indexed_chunks": 0, "empty_pages": 0}
             if not maintenance_reindex:
-                document.attempt_count += 1
+                document.status = FileStatus.INDEXING.value
+                if count_attempt:
+                    document.attempt_count += 1
                 document.last_error = None
                 db_session.commit()
+                claimed = True
 
             original_filename = document.original_filename
             workspace = (
@@ -240,9 +210,11 @@ def process_save_data(
                 message: str | None = None,
                 page_number: int | None = None,
                 total_pages: int | None = None,
-                status: str = "PROGRESS",
+                status: str = FileStatus.INDEXING.value,
                 db_session: Session | None = None,
             ) -> None:
+                nonlocal current_stage, current_page
+                current_stage, current_page = stage, page_number
                 if maintenance_reindex:
                     return
                 _publish_status(
@@ -271,7 +243,7 @@ def process_save_data(
                 total_pages=page_count,
                 db_session=db_session,
             )
-            self.update_state(state="PROGRESS", meta={"stage": "verify_files"})
+            task.update_state(state="PROGRESS", meta={"stage": "verify_files"})
 
             workspace_id = str(document.workspace_id)
             document_title = document.original_filename.rsplit(".", 1)[0]
@@ -383,6 +355,14 @@ def process_save_data(
                     len(embedding_data),
                 )
 
+                publish_status(
+                    document_id,
+                    FilePipelineStage.SAVING_DATA,
+                    message=f"Saving vectors for page {page} of {page_count}...",
+                    page_number=page,
+                    total_pages=page_count,
+                    db_session=db_session,
+                )
                 for collection_name in target_collections:
                     upsert_embeddings(
                         document_id=document_id,
@@ -401,6 +381,7 @@ def process_save_data(
                 indexed_pages += 1
                 indexed_chunks += len(chunk_data)
 
+            current_stage, current_page = FilePipelineStage.SAVING_DATA, None
             for collection_name in target_collections:
                 delete_document_embeddings_after_page(
                     document_id,
@@ -417,7 +398,7 @@ def process_save_data(
             )
 
             if not maintenance_reindex:
-                _set_status(document, FileStatus.COMPLETED, db_session)
+                document.status = FileStatus.COMPLETED.value
             publish_status(
                 document_id,
                 FilePipelineStage.COMPLETED,
@@ -432,20 +413,10 @@ def process_save_data(
                 "empty_pages": empty_pages,
             }
 
-    except Exception as e:
-        if document is not None and db_session is not None and not maintenance_reindex:
-            document.status = FileStatus.FAILED.value
-            document.last_error = str(e)
-            db_session.commit()
-        if not maintenance_reindex:
-            _publish_status(
-                document_id,
-                FilePipelineStage.FAILED,
-                original_filename=original_filename,
-                workspace_name=workspace_name,
-                message=str(e),
-                status=FileStatus.FAILED.value,
-                db_session=db_session,
+    except Exception as exc:
+        if claimed:
+            record_pipeline_failure(
+                document_id, current_stage, exc, workspace_name, current_page
             )
         raise
 

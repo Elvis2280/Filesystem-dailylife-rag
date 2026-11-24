@@ -4,7 +4,12 @@ import asyncio
 import logging
 
 from app.core.config import settings
+from app.services.ai.model_preferences import (
+    ensure_model_preferences_storage,
+    required_model_names,
+)
 from app.services.ai.ollama_client import OllamaClient
+from app.services.ai.model_names import model_is_available
 
 logger = logging.getLogger("memory_rag.ollama_preflight")
 
@@ -13,32 +18,29 @@ PREFLIGHT_DELAY_SECONDS = 5
 
 
 def required_models() -> set[str]:
-    """Return the unique Ollama models required by the application."""
-    return {
-        settings.OLLAMA_MODEL_OCR,
-        settings.OLLAMA_MODEL_FORMAT,
-        settings.OLLAMA_MODEL_TRANSLATION,
-        settings.OLLAMA_MODEL_CLEANER,
-        settings.OLLAMA_MODEL_EMBEDDING,
-        settings.OLLAMA_MODEL_AGENT,
-    }
+    """Return the unique models selected in the shared preferences row."""
+    return required_model_names()
 
 
 async def check_ollama() -> None:
     """Wait for the configured Ollama endpoint and validate required models."""
+    ensure_model_preferences_storage()
     client = OllamaClient(timeout=10)
 
     for attempt in range(1, PREFLIGHT_ATTEMPTS + 1):
         health = await client.health_check()
         if health.is_reachable:
-            available_models = set(health.available_models)
-            missing_models = sorted(required_models() - available_models)
+            missing_models = sorted(
+                model_name
+                for model_name in required_models()
+                if not model_is_available(model_name, set(health.available_models))
+            )
             if missing_models:
                 raise RuntimeError(
-                    "Ollama is reachable, but these configured models are missing: "
+                    "Ollama is reachable, but these selected models are missing: "
                     + ", ".join(missing_models)
-                    + ". Run 'ollama list' on the host and update the Coolify "
-                    "OLLAMA_MODEL_* variables to match the installed names."
+                    + ". Install them on the Ollama host or change the selections "
+                    "in the model preferences table."
                 )
 
             logger.info(

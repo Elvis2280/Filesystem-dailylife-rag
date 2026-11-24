@@ -191,6 +191,36 @@ def delete_document_embeddings_after_page(
     )
 
 
+def delete_document_embeddings(document_id: str, workspace_id: str) -> None:
+    """Remove one document's points from every configured document collection."""
+    client = get_qdrant_client()
+    collection_names = {
+        settings.QDRANT_COLLECTION or COLLECTION_NAME,
+        settings.QDRANT_HYBRID_COLLECTION or HYBRID_COLLECTION_NAME,
+    }
+    for collection_name in collection_names:
+        if not client.collection_exists(collection_name):
+            continue
+        client.delete(
+            collection_name=collection_name,
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="workspace_id",
+                            match=models.MatchValue(value=workspace_id),
+                        ),
+                        models.FieldCondition(
+                            key="document_id",
+                            match=models.MatchValue(value=document_id),
+                        ),
+                    ]
+                )
+            ),
+            wait=True,
+        )
+
+
 def upsert_embeddings(
     document_id: str,
     workspace_id: str,

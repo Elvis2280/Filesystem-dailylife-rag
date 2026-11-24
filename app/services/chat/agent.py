@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app.core.config import settings
 from app.core.prompts import CHAT_AGENT_PROMPT
+from app.services.ai.model_preferences import ModelRole, get_model_name_async
 from app.services.ai.ollama_client import OllamaClient
 
 
@@ -39,7 +39,7 @@ async def generate_answer(
     prompt = CHAT_AGENT_PROMPT.format(question=question, reference=reference)
     ollama_client = client or OllamaClient()
     raw_answer = await ollama_client.generate_async(
-        model=settings.OLLAMA_MODEL_AGENT,
+        model=await get_model_name_async(ModelRole.ANSWER),
         prompt=prompt,
         think=True,
         response_format=_GroundedAnswerPayload.model_json_schema(),

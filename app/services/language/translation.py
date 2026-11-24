@@ -5,9 +5,9 @@ Called by the Celery pipeline after language detection to produce
 bilingual document copies.
 """
 
-from app.core.config import settings
 from app.core.constant import LanguageOptions
 from app.core.prompts import TRANSLATE_TO_ENGLISH_PROMPT, TRANSLATE_TO_JAPANESE_PROMPT
+from app.services.ai.model_preferences import ModelRole, get_model_name_sync
 from app.services.ai.ollama_sync import OllamaSyncClient
 
 _PROMPTS = {
@@ -20,8 +20,7 @@ def translate_content(content: str, lang: LanguageOptions) -> str:
     """Translate text content to the target language.
 
     Sync function intended for use in Celery worker tasks. Uses the
-    configured translation model (OLLAMA_MODEL_TRANSLATION) and a
-    language-specific prompt.
+    database-selected translation model and a language-specific prompt.
 
     Args:
         content: The text content to translate.
@@ -46,7 +45,7 @@ def translate_content(content: str, lang: LanguageOptions) -> str:
     client = OllamaSyncClient()
     try:
         return client.generate(
-            model=settings.OLLAMA_MODEL_TRANSLATION,
+            model=get_model_name_sync(ModelRole.TRANSLATION),
             prompt=prompt,
         )
     except RuntimeError as e:

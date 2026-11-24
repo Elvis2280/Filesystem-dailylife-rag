@@ -1,6 +1,8 @@
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DocumentUploadResponse(BaseModel):
@@ -34,14 +36,39 @@ class FileConversionResponse(BaseModel):
     )
 
 
+class DocumentRetryResponse(BaseModel):
+    document_id: str
+    task_id: str
+    status: Literal["retry_queued"] = "retry_queued"
+
+
+class DocumentHistoryEvent(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    status: str
+    stage: str | None
+    step: str | None
+    message: str | None
+    page_number: int | None
+    total_pages: int | None
+    created_at: datetime
+
+
+class DocumentHistoryResponse(BaseModel):
+    document_id: UUID
+    events: list[DocumentHistoryEvent]
+    next_cursor: UUID | None
+
+
 class DocumentStatusResponse(BaseModel):
     document_id: str = Field(..., description="UUID of the document")
     original_filename: str = Field(..., description="Original uploaded filename")
     workspace_name: str = Field(..., description="Name of the document workspace")
-    task_id: str = Field(..., description="Celery task ID for status tracking")
+    task_id: str | None = Field(..., description="Celery task ID when available")
     status: str = Field(
         ...,
-        description="Celery task state: PENDING, STARTED, PROGRESS, SUCCESS, FAILURE",
+        description="Pipeline state: PENDING, PROGRESS, SUCCESS, FAILURE",
     )
     document_record_status: str = Field(
         ...,

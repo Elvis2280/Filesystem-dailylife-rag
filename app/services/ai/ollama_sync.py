@@ -91,7 +91,7 @@ class OllamaSyncClient:
             )
             return str(response.message.content)
         except Exception as e:
-            raise RuntimeError(f"Ollama generation failed: {e}")
+            raise RuntimeError(f"Ollama generation failed: {e}") from e
 
     def embed(
         self,

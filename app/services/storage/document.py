@@ -6,6 +6,7 @@ import asyncio
 import shutil
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import fitz
@@ -134,6 +135,7 @@ async def process_document_upload(
                 stage=FilePipelineStage.UPLOAD.value,
                 step=FilePipelineStage.UPLOAD.step,
                 message="File received by the upload endpoint",
+                created_at=datetime.now(timezone.utc),
             ),
             DocumentEventModel(
                 document_id=document_id,
@@ -142,6 +144,7 @@ async def process_document_upload(
                 stage=FilePipelineStage.OBJECT_STORAGE.value,
                 step=FilePipelineStage.OBJECT_STORAGE.step,
                 message="Original file persisted in Garage",
+                created_at=datetime.now(timezone.utc),
             ),
         ]
     )

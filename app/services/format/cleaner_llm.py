@@ -1,5 +1,5 @@
-from app.core.config import settings
 from app.core.prompts import CLEANING_PROMPT
+from app.services.ai.model_preferences import ModelRole, get_model_name_sync
 from app.services.ai.ollama_sync import OllamaSyncClient
 
 
@@ -12,6 +12,6 @@ def clean_text(content: str) -> str:
     """
     client = OllamaSyncClient()
     return client.generate(
-        model=settings.OLLAMA_MODEL_CLEANER,
+        model=get_model_name_sync(ModelRole.CLEANING),
         prompt=(CLEANING_PROMPT + "\n\n" + content),
     )

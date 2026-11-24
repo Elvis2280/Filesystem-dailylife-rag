@@ -11,7 +11,7 @@ from pathlib import Path
 
 import fitz
 from PIL import Image
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -19,6 +19,7 @@ from app.core.constant import ALLOWED_IMAGE_EXTENSIONS, FilePipelineStage
 from app.models.document import Document
 from app.models.document_event import DocumentEventModel
 from app.models.document_split import DocumentSplitModel
+from app.models.translation import TranslationModel
 from app.services.ocr.utils import build_libreoffice_command
 from app.services.storage.file_metadata import (
     converted_document_key,
@@ -65,7 +66,7 @@ def _document_splits_query(document_id: str):
 
 def _find_processing_document(document_id: str, db_session: Session) -> Document:
     document = db_session.execute(
-        select(Document).where(Document.id == document_id)
+        select(Document).where(Document.id == uuid.UUID(document_id))
     ).scalar_one_or_none()
     if not document:
         raise ValueError(f"Document with ID {document_id} not found in database.")
@@ -90,7 +91,7 @@ def _count_pdf_pages(path: Path) -> int:
 
 def convert_to_pdf(document_id: str, db_session: Session) -> Document:
     document = db_session.execute(
-        select(Document).where(Document.id == document_id)
+        select(Document).where(Document.id == uuid.UUID(document_id))
     ).scalar_one_or_none()
     if not document:
         raise ValueError(f"Document with ID {document_id} not found in database.")
@@ -318,6 +319,20 @@ def ensure_pdf_in_workspace(document_id: str, db_session: Session) -> Document:
     return _find_processing_document(document_id, db_session)
 
 
+def processing_splits(
+    source: Document, db_session: Session
+) -> list[DocumentSplitModel]:
+    if f".{source.file_extension}" in ALLOWED_IMAGE_EXTENSIONS:
+        _ensure_image_split(source, db_session)
+    return list(
+        db_session.scalars(
+            select(DocumentSplitModel)
+            .where(DocumentSplitModel.document_id == source.id)
+            .order_by(DocumentSplitModel.page_number)
+        )
+    )
+
+
 def return_list_images_path(document_id: str, db_session: Session) -> list[str]:
     source = _find_processing_document(document_id, db_session)
     root_document_id = _root_document_id(source)
@@ -358,10 +373,12 @@ def save_ocr_page(
     page_number: int,
     text: str,
     db_session: Session,
+    *,
+    invalidate_formatted_output: bool = False,
 ) -> DocumentSplitModel:
     split = db_session.execute(
         select(DocumentSplitModel).where(
-            DocumentSplitModel.document_id == document_id,
+            DocumentSplitModel.document_id == uuid.UUID(document_id),
             DocumentSplitModel.page_number == page_number,
         )
     ).scalar_one_or_none()
@@ -379,6 +396,17 @@ def save_ocr_page(
         source.id,
         page_number,
     )
+    if invalidate_formatted_output:
+        split.ocr_storage_key = None
+        split.ocr_size = None
+        split.markdown_storage_key = None
+        split.markdown_size = None
+        db_session.execute(
+            update(TranslationModel)
+            .where(TranslationModel.document_split_id == split.id)
+            .values(status="stale")
+        )
+        db_session.commit()
     size = put_text(text, object_key)
     split.ocr_storage_key = object_key
     split.ocr_size = size
@@ -388,13 +416,14 @@ def save_ocr_page(
     db_session.add(
         DocumentEventModel(
             document_id=root_document_id,
-            workspace_id=workspace_id,
+            workspace_id=source.workspace_id,
             document_split_id=split.id,
             status="ocr_completed",
             stage=FilePipelineStage.OCR_PROCESSING.value,
             step=FilePipelineStage.OCR_PROCESSING.step,
             message=f"OCR text for page {page_number} persisted in Garage",
             page_number=page_number,
+            total_pages=source.page_count,
         )
     )
     db_session.commit()

@@ -8,6 +8,9 @@ class WorkspaceStatus(str, Enum):
 
 class FileStatus(str, Enum):
     FILE_UPLOADED = "file_uploaded"
+    FILE_PROCESSING = "file_processing"
+    RETRY_QUEUED = "retry_queued"
+    RETRY_RUNNING = "retry_running"
     FILE_CONVERSION_STARTED = "file_conversion_started"
     FILE_CONVERSION_FINISHED = "file_conversion_finished"
     OCR_STARTED = "ocr_started"
@@ -15,6 +18,7 @@ class FileStatus(str, Enum):
     TRANSLATION_AND_FORMATTING_STARTED = "translation_and_formatting_started"
     TRANSLATION_AND_FORMATTING_FINISHED = "translation_and_formatting_finished"
     FILE_PROCESS_FINISHED = "file_process_finished"
+    INDEXING = "indexing"
     COMPLETED = "completed"
     FAILED = "failed"
 

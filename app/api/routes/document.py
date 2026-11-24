@@ -1,14 +1,15 @@
 import asyncio
 import logging
+import shutil
+import tempfile
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import datetime, timezone
 from email.utils import format_datetime
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from urllib.parse import quote
 
-from celery.result import AsyncResult
 from fastapi import (
     APIRouter,
     Depends,
@@ -16,25 +17,30 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
     status,
 )
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import select
+from redis.exceptions import RedisError
+from sqlalchemy import select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.api_key import is_api_key_valid
-from app.core.constant import ALLOWED_UPLOAD_MIME_TYPES
+from app.core.constant import ALLOWED_UPLOAD_MIME_TYPES, FilePipelineStage, FileStatus
 from app.core.database import get_db
-from app.core.redis_client import get_async_redis_client
-from app.core.websocket_manager import manager
+from app.core.redis_client import get_async_redis_client, redis_client
 from app.models.document import Document
+from app.models.document_event import DocumentEventModel
 from app.models.document_split import DocumentSplitModel
 from app.models.translation import TranslationModel
 from app.models.workspace import WorkspaceModel
 from app.schemas.document import (
+    DocumentHistoryEvent,
+    DocumentHistoryResponse,
+    DocumentRetryResponse,
     DocumentStatusResponse,
     DocumentUploadResponse,
     FileConversionPayload,
@@ -45,6 +51,13 @@ from app.services.storage.document import (
     convert_to_pdf,
     process_document_upload,
 )
+from app.services.storage.file_metadata import (
+    document_object_prefix,
+    original_document_key,
+    sha256_file,
+)
+from app.services.storage.object_storage import delete_prefix, put_file
+from app.services.rag.qdrant_client import delete_document_embeddings
 from app.services.storage.document_preview import (
     PdfPreviewNotFound,
     resolve_pdf_document,
@@ -56,6 +69,12 @@ from app.services.storage.image_preview import (
 from app.services.storage.translation_preview import (
     TranslationPreviewNotFound,
     resolve_translation,
+)
+from app.services.document_status import (
+    document_failure_message,
+    document_has_recent_activity,
+    document_worker_is_active,
+    resolve_document_status,
 )
 from app.services.storage.object_storage import (
     OBJECT_STREAM_CHUNK_SIZE,
@@ -393,33 +412,22 @@ async def upload_document(
         select(WorkspaceModel).where(WorkspaceModel.id == workspace_id)
     )
     workspace = result.scalar_one_or_none()
-    if not workspace:
+    if workspace is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Workspace '{workspace_id}' not found",
+            status_code=404, detail=f"Workspace '{workspace_id}' not found"
         )
-
     try:
         document, task_id = await process_document_upload(str(workspace.id), file, db)
-    except DuplicateDocumentError as e:
+    except DuplicateDocumentError as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
+            status_code=409,
             detail={
                 "message": "A document with the same content already exists in this workspace.",
-                "document_id": str(e.existing_document_id),
+                "document_id": str(exc.existing_document_id),
             },
-        ) from e
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to upload file: {e}",
-        )
-
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return DocumentUploadResponse(
         document_id=str(document.id),
         task_id=task_id,
@@ -430,6 +438,163 @@ async def upload_document(
         page_count=document.page_count,
         status=document.status,
         message="File uploaded and queued for OCR processing.",
+    )
+
+
+@router.patch("/documents/{document_id}", response_model=DocumentUploadResponse)
+async def replace_document(
+    document_id: str,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Replace a document's source file and rebuild its derived data."""
+    if not _is_valid_uuid(document_id):
+        raise HTTPException(status_code=400, detail="document_id must be a valid UUID")
+    if file.content_type not in ALLOWED_UPLOAD_MIME_TYPES:
+        allowed = ", ".join(sorted(ALLOWED_UPLOAD_MIME_TYPES))
+        raise HTTPException(
+            status_code=400, detail=f"Unsupported file type. Supported types: {allowed}"
+        )
+
+    result = await db.execute(
+        select(Document).where(Document.id == uuid.UUID(document_id)).with_for_update()
+    )
+    document = result.scalar_one_or_none()
+    if document is None:
+        raise HTTPException(
+            status_code=404, detail=f"Document '{document_id}' not found"
+        )
+    if document.parent_document_id is not None or document.file_role != "original":
+        raise HTTPException(
+            status_code=409, detail="Only original documents can be replaced"
+        )
+    busy_statuses = {
+        FileStatus.RETRY_QUEUED.value,
+        FileStatus.RETRY_RUNNING.value,
+        FileStatus.FILE_PROCESSING.value,
+        FileStatus.INDEXING.value,
+        "file_uploaded",
+        "file_conversion_started",
+        "file_conversion_finished",
+        "ocr_started",
+        "ocr_finished",
+        "translation_and_formatting_started",
+        "translation_and_formatting_finished",
+        "file_process_finished",
+        "processing_document_to_pdf",
+        "processing_pdf_to_image",
+    }
+    if document.status in busy_statuses:
+        raise HTTPException(
+            status_code=409, detail="Document is currently being processed"
+        )
+
+    uploaded_name = None
+    try:
+        uploaded_name = PurePath(file.filename or "unnamed").name
+        ext = uploaded_name.rsplit(".", 1)[-1].lower() if "." in uploaded_name else ""
+        stored_filename = (
+            f"{document.id}_original.{ext}" if ext else f"{document.id}_original"
+        )
+        with tempfile.TemporaryDirectory(prefix="replace-") as temp_dir:
+            source_path = Path(temp_dir) / stored_filename
+            with open(source_path, "wb") as output:
+                await asyncio.to_thread(shutil.copyfileobj, file.file, output)
+            checksum = await asyncio.to_thread(sha256_file, source_path)
+            duplicate = await db.execute(
+                select(Document.id).where(
+                    Document.workspace_id == document.workspace_id,
+                    Document.parent_document_id.is_(None),
+                    Document.file_role == "original",
+                    Document.checksum_sha256 == checksum,
+                    Document.id != document.id,
+                )
+            )
+            if duplicate.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=409,
+                    detail="This content belongs to another document in this workspace",
+                )
+
+            object_key = original_document_key(
+                document.workspace_id, document.id, stored_filename
+            )
+            await asyncio.to_thread(
+                put_file,
+                source_path,
+                object_key,
+                file.content_type or "application/octet-stream",
+            )
+            try:
+                await asyncio.to_thread(
+                    delete_document_embeddings,
+                    str(document.id),
+                    str(document.workspace_id),
+                )
+                await asyncio.to_thread(
+                    delete_prefix,
+                    document_object_prefix(document.workspace_id, document.id) + "/",
+                )
+                await db.execute(
+                    update(DocumentEventModel)
+                    .where(DocumentEventModel.document_id == document.id)
+                    .values(document_split_id=None, translation_id=None)
+                )
+                await db.refresh(document, ["splits"])
+                document.splits.clear()
+                document.original_filename = uploaded_name
+                document.stored_filename = stored_filename
+                document.storage_key = object_key
+                document.mime_type = file.content_type or "application/octet-stream"
+                document.file_extension = ext or None
+                document.size = source_path.stat().st_size
+                document.checksum_sha256 = checksum
+                document.page_count = (
+                    1
+                    if document.mime_type in {"image/png", "image/jpeg", "image/webp"}
+                    else None
+                )
+                document.status = "file_uploaded"
+                document.attempt_count = 0
+                document.last_error = None
+                db.add(
+                    DocumentEventModel(
+                        document_id=document.id,
+                        workspace_id=document.workspace_id,
+                        status="file_uploaded",
+                        stage=FilePipelineStage.UPLOAD.value,
+                        step=FilePipelineStage.UPLOAD.step,
+                        message="Replacement file received",
+                    )
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Document replacement failed document_id=%s", document_id)
+        raise HTTPException(
+            status_code=502,
+            detail="Replacement cleanup or storage failed; retry the request",
+        ) from exc
+
+    from workers.tasks.file_pipeline import process_file_upload
+
+    task = process_file_upload.delay(str(document.id))
+    redis_client.setex(f"document_task:{document.id}", 1800, task.id)
+    await db.refresh(document)
+    return DocumentUploadResponse(
+        document_id=str(document.id),
+        task_id=task.id,
+        workspace_id=str(document.workspace_id),
+        original_filename=document.original_filename,
+        mime_type=document.mime_type,
+        stored_filename=document.stored_filename,
+        page_count=document.page_count,
+        status=document.status,
+        message="File replaced and queued for processing.",
     )
 
 
@@ -677,6 +842,142 @@ async def head_split_image(
     )
 
 
+@router.post(
+    "/documents/{document_id}/retry",
+    response_model=DocumentRetryResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> DocumentRetryResponse:
+    if not _is_valid_uuid(document_id):
+        raise HTTPException(status_code=400, detail="document_id must be a valid UUID")
+    doc_id = uuid.UUID(document_id)
+    document = await db.scalar(
+        select(Document).where(Document.id == doc_id).with_for_update()
+    )
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if document.file_role != "original" or document.parent_document_id is not None:
+        raise HTTPException(
+            status_code=409, detail="Only original documents can be retried"
+        )
+
+    latest_event = await db.scalar(
+        select(DocumentEventModel)
+        .where(DocumentEventModel.document_id == doc_id)
+        .order_by(DocumentEventModel.created_at.desc(), DocumentEventModel.id.desc())
+        .limit(1)
+    )
+    if await document_worker_is_active(db, document):
+        raise HTTPException(status_code=409, detail="Document is still being processed")
+
+    effective_status, worker_stopped = await resolve_document_status(
+        db, document, latest_event
+    )
+    if effective_status == FileStatus.COMPLETED.value:
+        raise HTTPException(
+            status_code=409, detail="Completed documents cannot be retried"
+        )
+    is_saved_failure = document.status == FileStatus.FAILED.value or (
+        latest_event is not None and latest_event.status == FileStatus.FAILED.value
+    )
+    has_recent_activity = document_has_recent_activity(document, latest_event)
+    if not is_saved_failure and not worker_stopped and has_recent_activity:
+        raise HTTPException(
+            status_code=409,
+            detail="Document recently reported progress and may still be running",
+        )
+    if not is_saved_failure and not worker_stopped:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Document is not failed or abandoned (current status: {document.status})",
+        )
+
+    if effective_status == FileStatus.FAILED.value and (
+        latest_event is None or latest_event.status != FileStatus.FAILED.value
+    ):
+        db.add(
+            DocumentEventModel(
+                document_id=doc_id,
+                workspace_id=document.workspace_id,
+                status=FileStatus.FAILED.value,
+                stage=latest_event.stage if latest_event else None,
+                step=latest_event.step if latest_event else None,
+                message=document_failure_message(
+                    document, latest_event, worker_stopped
+                ),
+                page_number=latest_event.page_number if latest_event else None,
+                total_pages=document.page_count,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
+    # Older failures used a generic stage. Look back to their last real step.
+    processing_stages = {
+        stage.value
+        for stage in FilePipelineStage
+        if stage
+        not in (
+            FilePipelineStage.PENDING,
+            FilePipelineStage.FAILED,
+            FilePipelineStage.COMPLETED,
+        )
+    }
+    resume_from = (
+        await db.scalar(
+            select(DocumentEventModel.stage)
+            .where(
+                DocumentEventModel.document_id == doc_id,
+                DocumentEventModel.stage.in_(processing_stages),
+            )
+            .order_by(
+                DocumentEventModel.created_at.desc(), DocumentEventModel.id.desc()
+            )
+            .limit(1)
+        )
+        or FilePipelineStage.OBJECT_STORAGE.value
+    )
+
+    task_id = uuid.uuid4()
+    document.status = FileStatus.RETRY_QUEUED.value
+    document.last_error = None
+    db.add(
+        DocumentEventModel(
+            id=task_id,
+            document_id=doc_id,
+            workspace_id=document.workspace_id,
+            status=FileStatus.RETRY_QUEUED.value,
+            stage=FilePipelineStage.PENDING.value,
+            step=FilePipelineStage.PENDING.step,
+            message="Retry queued. Checking saved progress before resuming.",
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    try:
+        await db.flush()
+        # Use the broker even in eager mode. The worker waits on this row lock
+        # and verifies the committed queue event before it touches any files.
+        await asyncio.to_thread(
+            celery_app.send_task,
+            "workers.tasks.retry_document",
+            args=[str(doc_id), resume_from],
+            task_id=str(task_id),
+            retry=False,
+            ignore_result=False,
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("Could not queue retry for document %s", doc_id)
+        raise HTTPException(
+            status_code=503, detail="Could not queue document retry"
+        ) from exc
+
+    return DocumentRetryResponse(document_id=str(doc_id), task_id=str(task_id))
+
+
 @router.get(
     "/documents/{document_id}/status",
     response_model=DocumentStatusResponse,
@@ -685,66 +986,114 @@ async def head_split_image(
 async def get_document_status(
     document_id: str,
     db: AsyncSession = Depends(get_db),
-):
+) -> DocumentStatusResponse:
     if not _is_valid_uuid(document_id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="document_id must be a valid UUID",
-        )
-
+        raise HTTPException(status_code=400, detail="document_id must be a valid UUID")
+    doc_id = uuid.UUID(document_id)
     query_result = await db.execute(
         select(Document, WorkspaceModel.name)
         .join(WorkspaceModel, WorkspaceModel.id == Document.workspace_id)
-        .where(Document.id == document_id)
+        .where(Document.id == doc_id)
     )
     document_row = query_result.one_or_none()
     if document_row is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Document with ID {document_id} not found in database.",
+            status_code=404, detail=f"Document with ID {doc_id} not found"
         )
     document, workspace_name = document_row
 
-    redis_async = await get_async_redis_client()
-    task_id = await redis_async.get(f"document_task:{document_id}")
-    if not task_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No active task found for document {document_id}. The task may have expired or not been submitted.",
-        )
+    events = (
+        select(DocumentEventModel)
+        .where(DocumentEventModel.document_id == doc_id)
+        .order_by(DocumentEventModel.created_at.desc(), DocumentEventModel.id.desc())
+        .limit(1)
+    )
+    latest = await db.scalar(events)
+    retry_event = await db.scalar(
+        events.where(DocumentEventModel.status == FileStatus.RETRY_QUEUED.value)
+    )
+    task_id = str(retry_event.id) if retry_event is not None else None
+    if task_id is None:
+        try:
+            redis_async = await get_async_redis_client()
+            task_id = await redis_async.get(f"document_task:{doc_id}")
+        except RedisError:
+            logger.warning("Task ID unavailable in Redis for document %s", doc_id)
 
-    task = AsyncResult(task_id, app=celery_app)
-    task_state = task.state
-
-    result_payload = None
     error = None
-    message = "Task is pending"
-
-    if task_state == "SUCCESS":
-        result_payload = None
-        message = "OCR processing completed successfully"
-    elif task_state == "PROGRESS":
-        meta = task.info or {}
-        message = f"Task in progress: {meta.get('stage', 'unknown')}"
-    elif task_state == "FAILURE":
-        error = str(task.info) if task.info else "Unknown error"
-        message = f"Task failed: {error}"
-
-        if document.status != "failed":
-            document.status = "failed"
-            await db.commit()
+    message = (
+        latest.message if latest and latest.message else "Document is being processed"
+    )
+    effective_status, worker_stopped = await resolve_document_status(
+        db, document, latest
+    )
+    if effective_status == FileStatus.FAILED.value:
+        task_state = "FAILURE"
+        error = document_failure_message(document, latest, worker_stopped)
+        message = error
+    elif effective_status == FileStatus.COMPLETED.value:
+        task_state = "SUCCESS"
+        message = "Document processing and indexing completed"
+    elif effective_status in (
+        FileStatus.FILE_UPLOADED.value,
+        FileStatus.RETRY_QUEUED.value,
+    ):
+        task_state = "PENDING"
+    else:
+        task_state = "PROGRESS"
 
     return DocumentStatusResponse(
-        document_id=document_id,
+        document_id=str(doc_id),
         original_filename=document.original_filename,
         workspace_name=workspace_name,
         task_id=task_id,
         status=task_state,
-        document_record_status=document.status,
-        result=result_payload,
+        document_record_status=effective_status,
         error=error,
         message=message,
     )
+
+
+@router.get("/documents/{document_id}/history", response_model=DocumentHistoryResponse)
+async def get_document_history(
+    document_id: uuid.UUID,
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: uuid.UUID | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> DocumentHistoryResponse:
+    if await db.get(Document, document_id) is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    events = select(DocumentEventModel).where(
+        DocumentEventModel.document_id == document_id
+    )
+    if cursor is not None:
+        previous = await db.scalar(events.where(DocumentEventModel.id == cursor))
+        if previous is None:
+            raise HTTPException(
+                status_code=400, detail="Invalid document history cursor"
+            )
+        events = events.where(
+            tuple_(DocumentEventModel.created_at, DocumentEventModel.id)
+            < (previous.created_at, previous.id)
+        )
+    rows = (
+        await db.scalars(
+            events.order_by(
+                DocumentEventModel.created_at.desc(), DocumentEventModel.id.desc()
+            ).limit(limit + 1)
+        )
+    ).all()
+    return DocumentHistoryResponse(
+        document_id=document_id,
+        events=[DocumentHistoryEvent.model_validate(event) for event in rows[:limit]],
+        next_cursor=rows[limit - 1].id if len(rows) > limit else None,
+    )
+
+
+async def _wait_for_document_disconnect(websocket: WebSocket) -> None:
+    while (await websocket.receive())["type"] != "websocket.disconnect":
+        pass
 
 
 @router.websocket("/documents/{document_id}/ws")
@@ -758,13 +1107,25 @@ async def websocket_document_status(websocket: WebSocket, document_id: str):
         await websocket.close(code=1008, reason="Missing or invalid API key")
         return
 
-    await manager.connect(document_id, websocket)
+    await websocket.accept()
+    stream = asyncio.create_task(
+        stream_document_status(document_id, websocket.send_json)
+    )
+    disconnect = asyncio.create_task(_wait_for_document_disconnect(websocket))
     try:
-        await stream_document_status(document_id)
+        done, _ = await asyncio.wait(
+            {stream, disconnect}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in done:
+            task.result()
+        if disconnect not in done:
+            await websocket.close()
     except WebSocketDisconnect:
         pass
     finally:
-        manager.disconnect(document_id)
+        stream.cancel()
+        disconnect.cancel()
+        await asyncio.gather(stream, disconnect, return_exceptions=True)
 
 
 @router.post(

@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes.chat import router as chat_router
 from app.api.routes.document import router as document_router
+from app.api.routes.ollama import router as ollama_router
 from app.api.routes.workspace import router as workspace_router
 from app.core.api_key import is_api_key_valid
 from app.core.config import settings
@@ -53,6 +54,11 @@ async def lifespan(app: FastAPI):
     # ── Startup ──
     logger = configure_logging(settings.LOG_LEVEL)
     report = await validate_all()
+
+    if report.get("postgres_db"):
+        from app.services.ai.model_preferences import ensure_model_preferences_storage
+
+        ensure_model_preferences_storage()
 
     # --- Directory Validation ---
     dir_report = report["directories_created"]
@@ -91,59 +97,29 @@ async def lifespan(app: FastAPI):
     health_resp = await ollama.health_check()
     if health_resp.is_reachable:
         logger.info("Ollama: connected at %s", settings.OLLAMA_URL)
-        # OCR Model Check
-        if settings.OLLAMA_MODEL_OCR in health_resp.available_models:
-            logger.info(
-                "Ollama model '%s' for OCR is available", settings.OLLAMA_MODEL_OCR
-            )
-        else:
-            logger.warning(
-                "Ollama model '%s' for OCR is NOT available", settings.OLLAMA_MODEL_OCR
-            )
-        # Translation model Check
-        if settings.OLLAMA_MODEL_TRANSLATION in health_resp.available_models:
-            logger.info(
-                "Ollama mode '%s' for Translation is available",
-                settings.OLLAMA_MODEL_TRANSLATION,
-            )
-        else:
-            logger.warning(
-                "Ollama model '%s' for Translation is NOT available",
-                settings.OLLAMA_MODEL_TRANSLATION,
-            )
-        # Cleaner model Check
-        if settings.OLLAMA_MODEL_CLEANER in health_resp.available_models:
-            logger.info(
-                "Ollama model '%s' for Cleaner is available",
-                settings.OLLAMA_MODEL_CLEANER,
-            )
-        else:
-            logger.warning(
-                "Ollama model '%s' for Cleaner is NOT available",
-                settings.OLLAMA_MODEL_CLEANER,
-            )
-        # Embedding model Check
-        if settings.OLLAMA_MODEL_EMBEDDING in health_resp.available_models:
-            logger.info(
-                "Ollama model '%s' for Embedding is available",
-                settings.OLLAMA_MODEL_EMBEDDING,
-            )
-        else:
-            logger.warning(
-                "Ollama model '%s' for Embedding is NOT available",
-                settings.OLLAMA_MODEL_EMBEDDING,
-            )
-        # Agent model Check
-        if settings.OLLAMA_MODEL_AGENT in health_resp.available_models:
-            logger.info(
-                "Ollama model '%s' for Agent is available",
-                settings.OLLAMA_MODEL_AGENT,
-            )
-        else:
-            logger.warning(
-                "Ollama model '%s' for Agent is NOT available",
-                settings.OLLAMA_MODEL_AGENT,
-            )
+        from app.services.ai.model_names import model_is_available
+
+        if report.get("postgres_db"):
+            from app.services.ai.model_preferences import get_preferences_async
+
+            preferences = await get_preferences_async()
+            selected_models = {
+                "OCR": preferences.ocr_model,
+                "Translation": preferences.translation_model,
+                "Embedding": preferences.embedding_model,
+                "Answer": preferences.answer_model,
+                "Formatting": preferences.formatting_model,
+                "Cleaning": preferences.cleaning_model,
+            }
+            for role, model_name in selected_models.items():
+                if model_is_available(model_name, set(health_resp.available_models)):
+                    logger.info(
+                        "Ollama model '%s' for %s is available", model_name, role
+                    )
+                else:
+                    logger.warning(
+                        "Ollama model '%s' for %s is NOT available", model_name, role
+                    )
     else:
         logger.warning(
             "Ollama: NOT reachable at %s. OCR and LLM features will be unavailable.",
@@ -206,11 +182,14 @@ app.add_middleware(
     ],
 )
 
-# Register ollama routes only in dev mode
-if settings.IS_DEVELOPMENT:
-    from app.api.routes.ollama import router as ollama_router
+# Model management is available to the frontend in every environment.
+app.include_router(ollama_router)
 
-    app.include_router(ollama_router)
+# Keep the upload-based OCR test endpoint development-only.
+if settings.IS_DEVELOPMENT:
+    from app.api.routes.ollama import dev_router as ollama_dev_router
+
+    app.include_router(ollama_dev_router)
 
 # Register API route modules
 app.include_router(chat_router)
