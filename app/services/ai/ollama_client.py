@@ -223,8 +223,7 @@ def _raise_ollama_http_error(
         else OllamaGenerationError
     )
     raise error_type(
-        f"Ollama {operation} failed (HTTP error {status_code}): "
-        f"{error.response.text}"
+        f"Ollama {operation} failed (HTTP error {status_code}): {error.response.text}"
     ) from error
 
 
