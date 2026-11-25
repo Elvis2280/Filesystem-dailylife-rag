@@ -40,10 +40,10 @@ class OllamaSyncClient:
             port = port or settings.OLLAMA_PORT
             base_url = f"http://{host}:{port}"
         else:
-            base_url = settings.OLLAMA_URL
+            base_url = settings.inference_url
         self._client = Client(
             host=base_url,
-            timeout=settings.OLLAMA_TIMEOUT,
+            timeout=settings.inference_timeout,
         )
 
     def generate(

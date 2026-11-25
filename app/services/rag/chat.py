@@ -1,7 +1,10 @@
+import asyncio
 import logging
+from typing import Any
 
 from app.core.config import settings
-from app.services.rag.embedding import embedding
+from app.services.ai.model_preferences import ModelRole, get_model_name_async
+from app.services.ai.ollama_client import OllamaClient
 from app.services.rag.qdrant_client import search_embeddings
 
 logger = logging.getLogger("memory_rag.chat")
@@ -15,11 +18,11 @@ class NoResultsError(Exception):
     """Raised when a vector search returns no results."""
 
 
-def search_data(
+async def search_data(
     message: str,
     workspace_id: str,
     top_k: int = 20,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Search the vector store for data relevant to a chat message.
 
     Generates an embedding for the message with bge-m3 and runs a
@@ -46,7 +49,9 @@ def search_data(
         raise ValueError("Message must be at least 6 characters long")
 
     try:
-        query_vector = embedding([message])[0]
+        client = OllamaClient(base_url=settings.inference_url)
+        model = await get_model_name_async(ModelRole.EMBEDDING)
+        query_vector = await client.embed(model, message)
     except RuntimeError as e:
         logger.error("Embedding failed for message: %s", e)
         raise
@@ -57,7 +62,8 @@ def search_data(
         if use_hybrid
         else (settings.QDRANT_COLLECTION or "documents")
     )
-    results = search_embeddings(
+    results = await asyncio.to_thread(
+        search_embeddings,
         query_vector,
         workspace_id,
         limit=top_k,

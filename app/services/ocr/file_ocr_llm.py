@@ -106,7 +106,7 @@ def extract_image_text(
 
     # Use the complete URL to preserve a configured reverse proxy path prefix.
     with httpx.Client(
-        base_url=settings.OLLAMA_URL, timeout=settings.OLLAMA_TIMEOUT
+        base_url=settings.inference_url, timeout=settings.inference_timeout
     ) as client:
         for attempt in (1, 2):
             started = perf_counter()
@@ -137,7 +137,7 @@ def extract_image_text(
                 if isinstance(exc, httpx.TimeoutException):
                     reason = (
                         "Ollama OCR request timed out after "
-                        f"{settings.OLLAMA_TIMEOUT} seconds"
+                        f"{settings.inference_timeout} seconds"
                     )
                 repeated_tokens = "token repeat limit reached" in reason.casefold()
                 if retry and native and repeated_tokens:

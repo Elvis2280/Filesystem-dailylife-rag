@@ -25,7 +25,10 @@ from app.services.ai.model_preferences import (
     ModelRole,
     get_model_name_async,
 )
-from app.services.ai.ollama_client import OllamaClient, get_ollama_client
+from app.services.ai.ollama_client import (
+    OllamaClient,
+    get_ollama_client,
+)
 from app.services.ai.model_names import model_is_available
 from app.services.ocr.file_ocr_llm import extract_image_text
 
@@ -184,7 +187,7 @@ async def ollama_status(
     models = [model for model in model_results if model is not None]
     return OllamaStatusResponse(
         is_reachable=True,
-        available_models=[model.name for model in models],
+        available_models=sorted({model.name for model in models}),
         models=models,
         selected_models=selected_models,
     )
@@ -231,12 +234,12 @@ async def update_ollama_preferences(
 
     installed_models = set(health.available_models)
     for role_name, model_name in updates.items():
+        role = ModelRole(role_name)
         if not model_is_available(model_name, installed_models):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Model '{model_name}' is not installed on the Ollama server",
             )
-        role = ModelRole(role_name)
         try:
             model_details = await ollama.show_model(model_name)
         except (httpx.HTTPError, RuntimeError, ValueError) as exc:

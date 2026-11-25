@@ -54,6 +54,33 @@ User Query → API → RAG Service → Qdrant (vector search)
     → Build context → Return answer
 ```
 
+The private inference dispatcher uses one shared Ollama. It alternates a
+complete chat turn with one document inference call when both queues have
+work. The current document inference call finishes before a queued chat runs.
+
+For chat that survives reconnects, generate and save a UUIDv4 submission key
+before sending the request:
+
+1. Send `POST /api/v1/chat/jobs` with `{"workspace_id":"…","message":"…"}`,
+   `Idempotency-Key: <uuid>`, and the usual `X-API-Key`. Store the returned
+   `id` alongside the key. If the submit response is lost, repeat the same
+   POST and key to recover the original job.
+2. Poll `GET /api/v1/chat/jobs/{id}` about every two seconds with the same
+   headers. Continue polling after reconnecting. While `status` is `queued`
+   or `running`, show that progress in the pending chat message.
+3. Render `answer` on `completed` or `error.message` on `failed`. Completed jobs
+   have the same answer and citations as `POST /api/v1/chat`. Results are
+   available for 24 hours. Keep the submission key private.
+
+On a temporary 503, honor `Retry-After` if supplied and retry with the same key.
+The default maximum wait for an inference turn is 30 minutes.
+
+The server retries a transient model failure. If it has retrieved relevant
+pages and answer generation still fails, it returns labeled excerpts and
+citations. The existing JSON and stream endpoints still return their original
+response shapes. Their connection wait is limited by
+`CHAT_REQUEST_TIMEOUT_SECONDS`; use the job endpoints to resume longer waits.
+
 ## Folder Structure
 
 ```

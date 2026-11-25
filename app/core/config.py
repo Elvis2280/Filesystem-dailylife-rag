@@ -95,6 +95,10 @@ class Settings(BaseSettings):
 
     # Ollama
     OLLAMA_BASE_URL: str | None = None
+    # Compose sets this on API and Celery only. The dispatcher uses OLLAMA_URL.
+    INFERENCE_BASE_URL: str | None = None
+    CHAT_REDIS_HOST: str = "chat-redis"
+    INFERENCE_QUEUE_TIMEOUT_SECONDS: int = Field(default=1800, gt=0)
     OLLAMA_HOST: str = "localhost"
     OLLAMA_PORT: int = 11434
     OLLAMA_MODEL_OCR: str = "glm-ocr:latest"
@@ -106,6 +110,8 @@ class Settings(BaseSettings):
     OLLAMA_MODEL_EMBEDDING: str = "bge-m3:latest"
     OLLAMA_MODEL_AGENT: str = "qwen3.5:9b"
     OLLAMA_TIMEOUT: int = 600
+    CHAT_REQUEST_TIMEOUT_SECONDS: int = Field(default=180, gt=0)
+    CHAT_STREAM_HEARTBEAT_SECONDS: int = Field(default=10, gt=0)
 
     @model_validator(mode="after")
     def _validate_ocr_token_budget(self) -> "Settings":
@@ -115,7 +121,7 @@ class Settings(BaseSettings):
             )
         return self
 
-    @field_validator("OLLAMA_BASE_URL", mode="before")
+    @field_validator("OLLAMA_BASE_URL", "INFERENCE_BASE_URL", mode="before")
     @classmethod
     def _normalize_ollama_base_url(cls, value: str | None) -> str | None:
         if value is None:
@@ -127,13 +133,11 @@ class Settings(BaseSettings):
 
         parsed_url = urlsplit(base_url)
         if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
-            raise ValueError(
-                "OLLAMA_BASE_URL must be an absolute http:// or https:// URL"
-            )
+            raise ValueError("Inference URLs must be absolute http:// or https:// URLs")
         try:
             parsed_url.port
         except ValueError as exc:
-            raise ValueError("OLLAMA_BASE_URL contains an invalid port") from exc
+            raise ValueError("Inference URL contains an invalid port") from exc
 
         return base_url
 
@@ -143,6 +147,16 @@ class Settings(BaseSettings):
         if self.OLLAMA_BASE_URL:
             return self.OLLAMA_BASE_URL
         return f"http://{self.OLLAMA_HOST}:{self.OLLAMA_PORT}"
+
+    @property
+    def inference_url(self) -> str:
+        return self.INFERENCE_BASE_URL or self.OLLAMA_URL
+
+    @property
+    def inference_timeout(self) -> int:
+        if self.INFERENCE_BASE_URL:
+            return self.OLLAMA_TIMEOUT + self.INFERENCE_QUEUE_TIMEOUT_SECONDS + 10
+        return self.OLLAMA_TIMEOUT
 
     @property
     def REQUIRED_DIRS(self) -> list[str]:
@@ -194,6 +208,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 settings = Settings()

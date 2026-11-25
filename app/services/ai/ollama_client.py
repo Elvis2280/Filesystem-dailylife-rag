@@ -6,6 +6,7 @@ as parameters — callers are responsible for prompt engineering and model selec
 For synchronous calls in Celery workers, see app.services.ai.ollama_sync.
 """
 
+import logging
 from typing import Any
 
 import httpx
@@ -13,9 +14,19 @@ import httpx
 from app.core.config import settings
 from app.schemas.ollama import OllamaStatusResponse
 
+logger = logging.getLogger("memory_rag.ollama")
 
-class OllamaTimeoutError(RuntimeError):
+
+class OllamaTransientError(RuntimeError):
+    """Raised for Ollama failures that are reasonable to retry once."""
+
+
+class OllamaTimeoutError(OllamaTransientError):
     """Raised when Ollama does not respond within the configured timeout."""
+
+
+class OllamaGenerationError(RuntimeError):
+    """Raised when Ollama rejects a generation request permanently."""
 
 
 class OllamaClient:
@@ -37,6 +48,7 @@ class OllamaClient:
         host: str | None = None,
         port: int | None = None,
         timeout: int | None = None,
+        base_url: str | None = None,
     ):
         """Initialize the async Ollama client.
 
@@ -49,7 +61,9 @@ class OllamaClient:
         self.host = host or settings.OLLAMA_HOST
         self.port = port or settings.OLLAMA_PORT
         self.timeout = timeout or settings.OLLAMA_TIMEOUT
-        if host is not None or port is not None:
+        if base_url is not None:
+            self.base_url = base_url.rstrip("/")
+        elif host is not None or port is not None:
             self.base_url = f"http://{self.host}:{self.port}"
         else:
             self.base_url = settings.OLLAMA_URL
@@ -96,6 +110,28 @@ class OllamaClient:
             if not isinstance(details, dict):
                 raise RuntimeError("Ollama returned invalid model details")
             return details
+
+    async def embed(self, model: str, message: str) -> list[float]:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.post(
+                    f"{self.base_url}/api/embed",
+                    json={"model": model, "input": [message]},
+                )
+                response.raise_for_status()
+                return response.json()["embeddings"][0]
+            except httpx.HTTPStatusError as exc:
+                _raise_ollama_http_error(exc, operation="embedding")
+            except httpx.TimeoutException as exc:
+                raise OllamaTimeoutError("Ollama chat embedding timed out") from exc
+            except httpx.TransportError as exc:
+                raise OllamaTransientError(
+                    "Could not reach Ollama for chat embedding"
+                ) from exc
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                raise OllamaGenerationError(
+                    "Ollama returned an invalid embedding"
+                ) from exc
 
     async def generate_async(
         self,
@@ -152,17 +188,44 @@ class OllamaClient:
                     json=request_data,
                 )
                 response.raise_for_status()
-                return response.json().get("message", {}).get("content", "")
+                payload = response.json()
+                logger.info(
+                    "Ollama generation model=%s load_ns=%s prompt_eval_ns=%s eval_ns=%s output_tokens=%s",
+                    model,
+                    payload.get("load_duration"),
+                    payload.get("prompt_eval_duration"),
+                    payload.get("eval_duration"),
+                    payload.get("eval_count"),
+                )
+                return payload.get("message", {}).get("content", "")
             except httpx.HTTPStatusError as e:
-                raise RuntimeError(
-                    f"Ollama generation failed (HTTP error {e.response.status_code}): {e.response.text}"
-                ) from e
+                _raise_ollama_http_error(e, operation="generation")
             except httpx.TimeoutException as e:
                 raise OllamaTimeoutError(
                     f"Ollama generation timed out after {self.timeout} seconds"
                 ) from e
+            except httpx.TransportError as e:
+                raise OllamaTransientError(
+                    f"Could not reach Ollama for generation: {e}"
+                ) from e
             except Exception as e:
-                raise RuntimeError(f"Ollama generation failed: {e}") from e
+                raise OllamaGenerationError(f"Ollama generation failed: {e}") from e
+
+
+def _raise_ollama_http_error(
+    error: httpx.HTTPStatusError,
+    operation: str = "request",
+) -> None:
+    status_code = error.response.status_code
+    error_type = (
+        OllamaTransientError
+        if status_code in {408, 425, 429} or status_code >= 500
+        else OllamaGenerationError
+    )
+    raise error_type(
+        f"Ollama {operation} failed (HTTP error {status_code}): "
+        f"{error.response.text}"
+    ) from error
 
 
 def get_ollama_client() -> OllamaClient:

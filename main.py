@@ -92,17 +92,15 @@ async def lifespan(app: FastAPI):
 
     # --- Ollama Model Availability Check ---
     from app.services.ai.ollama_client import OllamaClient
+    from app.services.ai.model_names import model_is_available
+    from app.services.ai.model_preferences import get_preferences_async
 
     ollama = OllamaClient()
     health_resp = await ollama.health_check()
+    preferences = await get_preferences_async() if report.get("postgres_db") else None
     if health_resp.is_reachable:
         logger.info("Ollama: connected at %s", settings.OLLAMA_URL)
-        from app.services.ai.model_names import model_is_available
-
-        if report.get("postgres_db"):
-            from app.services.ai.model_preferences import get_preferences_async
-
-            preferences = await get_preferences_async()
+        if preferences is not None:
             selected_models = {
                 "OCR": preferences.ocr_model,
                 "Translation": preferences.translation_model,
@@ -120,6 +118,7 @@ async def lifespan(app: FastAPI):
                     logger.warning(
                         "Ollama model '%s' for %s is NOT available", model_name, role
                     )
+
     else:
         logger.warning(
             "Ollama: NOT reachable at %s. OCR and LLM features will be unavailable.",
@@ -130,12 +129,15 @@ async def lifespan(app: FastAPI):
     if errors:
         raise RuntimeError("Startup validation failed: " + "; ".join(errors))
 
-    yield  # ── Application runs here ──
+    try:
+        yield  # ── Application runs here ──
+    finally:
+        # ── Shutdown ──
+        from app.core.redis_client import close_async_redis_client
+        from app.services.chat.jobs import chat_jobs
 
-    # ── Shutdown ──
-    from app.core.redis_client import close_async_redis_client
-
-    await close_async_redis_client()
+        await chat_jobs.redis.aclose()
+        await close_async_redis_client()
 
 
 app = FastAPI(

@@ -131,6 +131,8 @@ OLLAMA_MODEL_CLEANER=qwen3.5:9b
 OLLAMA_MODEL_EMBEDDING=bge-m3
 OLLAMA_MODEL_AGENT=qwen3.5:9b
 OLLAMA_TIMEOUT=600
+# Optional queue wait limit in seconds
+# INFERENCE_QUEUE_TIMEOUT_SECONDS=1800
 EMBEDDING_DEVICE=cpu
 GARAGE_BUCKET=memory-rag
 # Use the HTTPS Ollama endpoint:
@@ -145,8 +147,30 @@ Coolify should generate and store `API_KEY`, `POSTGRES_PASSWORD`, and all
 `http://garage:3900` S3 endpoint; do not publish Garage through a Coolify domain.
 The `OLLAMA_MODEL_*` values must exactly match the model names shown by
 `ollama list` on the Ollama server. The deployment runs `ollama-check`, which
-retries the configured endpoint and blocks API/worker startup if a model is
-missing.
+retries the configured endpoint and blocks startup if a selected model,
+including the answer model, is missing. Install the answer model on the shared
+Ollama before redeploying. Remove the obsolete `OLLAMA_CHAT_BASE_URL` setting.
+
+Keep the `inference` service on the private Docker network with one replica.
+It schedules both chat and ingestion against the same host Ollama.
+When replacing it, stop the old dispatcher before starting its replacement.
+Queued chat jobs stay in the chat Redis volume.
+Set `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` on that Ollama
+server for the shared GPU setup. If Hermes uses the same Ollama, attach Hermes
+to the private network and point its Ollama URL to `http://inference:8001` or
+its OpenAI-compatible URL to `http://inference:8001/v1`. Leave the dispatcher
+without a public port or Coolify domain. Any client using the host Ollama URL
+directly bypasses the ordering.
+
+The frontend chat job contract is in [Query Flow](README.md#query-flow).
+Clients need the job endpoints to resume an answer after a disconnect.
+
+Before switching client traffic, upload a multi-page PDF and submit three
+questions while OCR and Hermes are active. Confirm that the chat jobs
+complete in order, the document resumes, and polling a saved receipt after
+reconnecting returns its answer. Compare `queue_wait` in the dispatcher logs
+and `load_ns` and `eval_ns` in the Ollama generation logs to distinguish
+queue delay from model loading and decoding.
 The API key is sent as `X-API-Key` on REST requests. For the document status
 WebSocket, send the key as `X-API-Key` when supported by the client or as the
 query parameter `api_key`:
@@ -162,18 +186,19 @@ Tauri application can be extracted. It is not production user authentication.
 
 Startup is ordered as follows:
 
-1. PostgreSQL, Redis, Qdrant, and Garage become healthy.
+1. PostgreSQL, Redis, chat Redis, Qdrant, and Garage become healthy.
 2. `migrate` runs `alembic upgrade head` from the image contents.
 3. `ollama-check` retries the configured Ollama endpoint and validates all configured
    model names.
-4. The API and worker start.
+4. The inference dispatcher, API, and worker start.
 
 Check the `ollama-check`, `migrate`, `api`, and `worker` logs in Coolify.
 Successful one-shot services should show an exited-successfully state; API
 health is available at `/health`.
 
 The Compose file uses named volumes for PostgreSQL, Qdrant, Garage metadata and
-objects, temporary processing data, and model cache. Host Ollama owns its model
+objects, temporary processing data, model cache, and durable chat jobs
+(`chat_redis_data`). Host Ollama owns its model
 storage outside this Coolify application. Keep the Compose volumes when
 redeploying and back up both Garage volumes, the other persistent volumes, and
 the host Ollama model directory according to the server's storage policy.
@@ -195,8 +220,9 @@ LAN address and port. Do not delete and recreate the Coolify resource.
    the resource so its services cannot write while being backed up.
 2. On the Coolify server, list volumes for this Compose project and inspect
    their `com.docker.compose.project` and `com.docker.compose.volume` labels.
-   Select only its six app volumes: `postgres_data`, `qdrant_data`,
-   `garage_meta`, `garage_data`, `temp_data`, and `model_cache`. Coolify may
+   Select only its app volumes: `postgres_data`, `qdrant_data`,
+   `garage_meta`, `garage_data`, `temp_data`, `model_cache`, and
+   `chat_redis_data`. Coolify may
    prefix or normalize their actual names. Do not select volumes belonging to
    another resource or host Ollama. The commands below use
    `<resource-uuid>` and `<volume-name>` as placeholders; replace them with

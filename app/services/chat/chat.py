@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.config import settings
-from app.services.chat.agent import generate_answer
+from app.services.ai.ollama_client import OllamaGenerationError, OllamaTransientError
+from app.services.chat.agent import EmptyAgentResponseError, generate_answer
 from app.services.rag.chat import (
     NO_RELATED_DATA_MESSAGE,
     NoResultsError,
@@ -14,6 +15,10 @@ from app.services.rag.chat import (
 )
 
 logger = logging.getLogger("memory_rag.chat_service")
+RETRIEVAL_ATTEMPTS = 2
+RETRY_DELAY_SECONDS = 1
+CITATION_RESERVE_SECONDS = 5
+EXCERPT_MAX_CHARS = 400
 
 
 class InvalidChatMessageError(ValueError):
@@ -37,18 +42,41 @@ async def answer_chat(
     workspace_id: str,
     candidate_limit: int = 20,
     context_limit: int = 6,
+    *,
+    deadline: float | None = None,
 ) -> ChatAnswer:
     """Retrieve workspace matches and generate a grounded chat answer."""
     normalized_message = message.strip()
     if len(normalized_message) < 6:
         raise InvalidChatMessageError("Message must be at least 6 characters long")
 
-    matches = await asyncio.to_thread(
-        search_data,
-        normalized_message,
-        workspace_id,
-        candidate_limit,
-    )
+    logger.info("Starting chat retrieval workspace=%s", workspace_id)
+    for attempt in range(1, RETRIEVAL_ATTEMPTS + 1):
+        try:
+            matches = await search_data(
+                normalized_message,
+                workspace_id,
+                candidate_limit,
+            )
+            logger.info(
+                "Chat retrieval completed workspace=%s results=%d attempt=%d",
+                workspace_id,
+                len(matches),
+                attempt,
+            )
+            break
+        except RuntimeError:
+            if attempt >= RETRIEVAL_ATTEMPTS:
+                raise
+            logger.warning(
+                "Chat retrieval failed for workspace=%s (attempt %d/%d); "
+                "retrying once in the backend",
+                workspace_id,
+                attempt,
+                RETRIEVAL_ATTEMPTS,
+                exc_info=True,
+            )
+            await asyncio.sleep(RETRY_DELAY_SECONDS)
     if not matches:
         raise NoResultsError(NO_RELATED_DATA_MESSAGE)
 
@@ -77,16 +105,44 @@ async def answer_chat(
             "The matching results do not contain searchable text"
         )
 
-    generated = await generate_answer(
-        normalized_message,
-        [
-            {
-                "source_id": str(match["source_id"]),
-                "text": str((match.get("payload") or {}).get("text") or ""),
-            }
-            for match in context_matches
-        ],
+    references = [
+        {
+            "source_id": str(match["source_id"]),
+            "text": str((match.get("payload") or {}).get("text") or ""),
+        }
+        for match in context_matches
+    ]
+    generation_deadline = (
+        deadline - CITATION_RESERVE_SECONDS if deadline is not None else None
     )
+    try:
+        async with asyncio.timeout_at(generation_deadline):
+            generated = await generate_answer(normalized_message, references)
+    except (
+        TimeoutError,
+        OllamaTransientError,
+        OllamaGenerationError,
+        EmptyAgentResponseError,
+    ) as exc:
+        logger.warning(
+            "Returning source excerpts for workspace=%s after chat generation failed: %s: %s",
+            workspace_id,
+            type(exc).__name__,
+            exc,
+        )
+        excerpts = []
+        for reference in references[:2]:
+            excerpt = " ".join(reference["text"].split())
+            if len(excerpt) > EXCERPT_MAX_CHARS:
+                excerpt = excerpt[:EXCERPT_MAX_CHARS].rstrip() + "…"
+            excerpts.append(f"[{reference['source_id']}] {excerpt}")
+        return ChatAnswer(
+            response=(
+                "I couldn’t finish generating a full answer. Here are the most "
+                "relevant excerpts I found:\n\n" + "\n\n".join(excerpts)
+            ),
+            matches=context_matches[: len(excerpts)],
+        )
     context_by_id = {str(match["source_id"]): match for match in context_matches}
     cited_matches = [
         context_by_id[source_id]

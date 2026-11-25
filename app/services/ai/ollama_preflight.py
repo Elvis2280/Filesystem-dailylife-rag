@@ -4,22 +4,17 @@ import asyncio
 import logging
 
 from app.core.config import settings
+from app.services.ai.model_names import model_is_available
 from app.services.ai.model_preferences import (
     ensure_model_preferences_storage,
     required_model_names,
 )
 from app.services.ai.ollama_client import OllamaClient
-from app.services.ai.model_names import model_is_available
 
 logger = logging.getLogger("memory_rag.ollama_preflight")
 
 PREFLIGHT_ATTEMPTS = 30
 PREFLIGHT_DELAY_SECONDS = 5
-
-
-def required_models() -> set[str]:
-    """Return the unique models selected in the shared preferences row."""
-    return required_model_names()
 
 
 async def check_ollama() -> None:
@@ -32,7 +27,7 @@ async def check_ollama() -> None:
         if health.is_reachable:
             missing_models = sorted(
                 model_name
-                for model_name in required_models()
+                for model_name in required_model_names()
                 if not model_is_available(model_name, set(health.available_models))
             )
             if missing_models:
@@ -46,7 +41,7 @@ async def check_ollama() -> None:
             logger.info(
                 "Ollama is ready at %s with %d required model(s)",
                 settings.OLLAMA_URL,
-                len(required_models()),
+                len(required_model_names()),
             )
             return
 

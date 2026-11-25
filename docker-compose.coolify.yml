@@ -100,6 +100,9 @@ services:
       OLLAMA_MODEL_EMBEDDING: ${OLLAMA_MODEL_EMBEDDING:-bge-m3}
       OLLAMA_MODEL_AGENT: ${OLLAMA_MODEL_AGENT:-qwen3.5:9b}
       OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-600}
+      INFERENCE_QUEUE_TIMEOUT_SECONDS: ${INFERENCE_QUEUE_TIMEOUT_SECONDS:-1800}
+      CHAT_REQUEST_TIMEOUT_SECONDS: ${CHAT_REQUEST_TIMEOUT_SECONDS:-180}
+      CHAT_REDIS_HOST: chat-redis
       TEMP_PATH: /app/temp_storage
       TEMP_OCR_PATH: /app/temp_storage/ocr
       CELERY_TASK_ALWAYS_EAGER: 'false'
@@ -121,6 +124,35 @@ services:
         condition: service_healthy
     restart: 'no'
 
+  chat-redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'yes', '--appendfsync', 'always']
+    volumes:
+      - chat_redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  inference:
+    build: .
+    command: ['uvicorn', 'app.api.inference:app', '--host', '0.0.0.0', '--port', '8001', '--workers', '1']
+    environment: *app_environment
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      chat-redis:
+        condition: service_healthy
+      ollama-check:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -130,13 +162,17 @@ services:
       - '8000'
     ports:
       - '${RAG_HTTP_PORT:-18080}:8000'
-    environment: *app_environment
+    environment:
+      <<: *app_environment
+      INFERENCE_BASE_URL: http://inference:8001
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     volumes:
       - temp_data:/app/temp_storage
       - model_cache:/home/appuser/.cache
     depends_on:
+      inference:
+        condition: service_started
       postgres:
         condition: service_healthy
       redis:
@@ -180,13 +216,17 @@ services:
         '--loglevel=info',
         '--pool=threads',
       ]
-    environment: *app_environment
+    environment:
+      <<: *app_environment
+      INFERENCE_BASE_URL: http://inference:8001
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     volumes:
       - temp_data:/app/temp_storage
       - model_cache:/home/appuser/.cache
     depends_on:
+      inference:
+        condition: service_started
       postgres:
         condition: service_healthy
       redis:
@@ -212,3 +252,4 @@ volumes:
   garage_meta:
   temp_data:
   model_cache:
+  chat_redis_data:
