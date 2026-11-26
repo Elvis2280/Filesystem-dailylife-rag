@@ -3,12 +3,12 @@ from app.services.ai.model_preferences import ModelRole, get_model_name_sync
 from app.services.ai.ollama_sync import OllamaSyncClient
 
 
-def format_markdown(content: str) -> str:
+def format_markdown(content: str, *, model_name: str | None = None) -> str:
     """
     Format the content from plain text format to markdown format.
     """
     client = OllamaSyncClient()
     return client.generate(
-        model=get_model_name_sync(ModelRole.FORMATTING),
+        model=model_name or get_model_name_sync(ModelRole.FORMATTING),
         prompt=(FORMAT_TO_MARKDOWN_PROMP + "\n\n" + content),
     )

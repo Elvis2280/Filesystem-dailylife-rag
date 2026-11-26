@@ -15,11 +15,16 @@ from app.core.database import async_session
 from app.core.redis_client import get_async_redis_client
 from app.services.document_status import (
     document_failure_message,
+    reconcile_replacement_start_failure,
     resolve_document_status,
 )
 
 logger = logging.getLogger("memory_rag.ws.document_status")
-TERMINAL_STATUSES = {FileStatus.COMPLETED.value, FileStatus.FAILED.value}
+TERMINAL_STATUSES = {
+    FileStatus.COMPLETED.value,
+    FileStatus.FAILED.value,
+    FileStatus.CANCELLED.value,
+}
 
 
 def _parse_step_number(step: str | int | None) -> int | None:
@@ -69,6 +74,24 @@ async def _get_current_state(document_id: str) -> dict | None:
             .limit(1)
         )
         history = history_result.scalar_one_or_none()
+        failure = await reconcile_replacement_start_failure(db, document, history)
+        if failure is not None:
+            await db.commit()
+            history = failure
+        if document.status == FileStatus.CANCELLING.value:
+            cancellation_result = await db.execute(
+                select(DocumentEventModel)
+                .where(
+                    DocumentEventModel.document_id == doc_uuid,
+                    DocumentEventModel.status == FileStatus.CANCELLING.value,
+                )
+                .order_by(
+                    DocumentEventModel.created_at.desc(),
+                    DocumentEventModel.id.desc(),
+                )
+                .limit(1)
+            )
+            history = cancellation_result.scalar_one_or_none() or history
         effective_status, worker_stopped = await resolve_document_status(
             db, document, history
         )
@@ -77,6 +100,8 @@ async def _get_current_state(document_id: str) -> dict | None:
             if history and history.message
             else "Document is being processed"
         )
+        if document.status == FileStatus.CANCELLING.value:
+            message = document.last_error or "Cancellation cleanup is in progress"
         if effective_status == FileStatus.FAILED.value:
             message = document_failure_message(document, history, worker_stopped)
 
@@ -138,6 +163,16 @@ async def stream_document_status(
             if message is None:
                 try:
                     current_state = await _get_current_state(document_id)
+                    if current_state is None:
+                        await send(
+                            {
+                                "type": "current_state",
+                                "status": FileStatus.CANCELLED.value,
+                                "document_id": document_id,
+                                "message": "Document was removed.",
+                            }
+                        )
+                        break
                     if (
                         current_state
                         and current_state.get("status") in TERMINAL_STATUSES
@@ -151,6 +186,9 @@ async def stream_document_status(
             if message["type"] != "message":
                 continue
             data = json.loads(message["data"])
+            if data.get("status") == FileStatus.CANCELLED.value:
+                await send(data)
+                break
             if data.get("status") in TERMINAL_STATUSES:
                 # A delayed terminal notification must not close a newer retry's stream.
                 current_state = await _get_current_state(document_id)

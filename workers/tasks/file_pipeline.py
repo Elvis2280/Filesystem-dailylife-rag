@@ -8,13 +8,14 @@ from typing import Iterator
 from uuid import UUID
 
 from celery import Task
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.constant import (
     ALLOWED_IMAGE_EXTENSIONS,
     FilePipelineStage,
     FileStatus,
+    REPLACEMENT_UPLOAD_MESSAGE,
 )
 from app.core.database import document_lock_engine, get_sync_db
 from app.core.document_lock import document_lock_key
@@ -23,8 +24,10 @@ from app.models.document import Document
 from app.models.document_event import DocumentEventModel
 from app.models.document_split import DocumentSplitModel
 from app.models.workspace import WorkspaceModel
+from app.services.ai.model_preferences import ModelRole, get_model_names_sync
 from app.services.format.format import format_all_markdown
 from app.services.ocr.file_ocr_llm import extract_image_text
+from app.services.rag.qdrant_client import delete_document_embeddings
 from app.services.storage.document_sync import (
     convert_to_images,
     convert_to_pdf,
@@ -32,7 +35,13 @@ from app.services.storage.document_sync import (
     processing_splits,
     save_ocr_page,
 )
-from app.services.storage.object_storage import download_file, get_text, object_exists
+from app.services.storage.file_metadata import document_object_prefix
+from app.services.storage.object_storage import (
+    delete_prefix,
+    download_file,
+    get_text,
+    object_exists,
+)
 from workers.celery_app import celery_app
 
 
@@ -48,6 +57,25 @@ def document_worker_lock(document_id: str) -> Iterator[None]:
         finally:
             lock_connection.scalar(select(func.pg_advisory_unlock(key)))
             lock_connection.commit()
+
+
+@contextmanager
+def try_document_worker_lock(document_id: str) -> Iterator[bool]:
+    """Try to acquire the document lock without blocking a worker process."""
+    key = document_lock_key(UUID(document_id))
+    with document_lock_engine.connect() as lock_connection:
+        acquired = bool(lock_connection.scalar(select(func.pg_try_advisory_lock(key))))
+        lock_connection.commit()
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                lock_connection.scalar(select(func.pg_advisory_unlock(key)))
+                lock_connection.commit()
+
+
+class DocumentCancellationRequested(RuntimeError):
+    """Raised when a worker reaches a checkpoint after cancellation was requested."""
 
 
 def _publish_status(
@@ -74,33 +102,53 @@ def _publish_status(
         "total_pages": total_pages,
         "timestamp": datetime.now().isoformat(),
     }
-    if db_session is not None:
-        document = db_session.get(Document, UUID(document_id))
-        if document is not None:
-            event = DocumentEventModel(
-                document_id=document.id,
-                workspace_id=document.workspace_id,
-                status=status,
-                stage=stage.value,
-                step=stage.step,
-                message=message or stage.message,
-                page_number=page_number,
-                total_pages=total_pages,
-            )
-            db_session.add(event)
-            db_session.commit()
 
-    try:
-        redis_client.publish(
-            f"document_updates:{document_id}",
-            json.dumps(payload),
+    def publish_redis_status() -> None:
+        try:
+            redis_client.publish(
+                f"document_updates:{document_id}",
+                json.dumps(payload),
+            )
+        except Exception as e:
+            logging.getLogger("memory_rag.pipeline").warning(
+                "Failed to publish status to Redis for document %s: %s",
+                document_id,
+                e,
+            )
+
+    if db_session is not None:
+        result = db_session.execute(
+            update(Document)
+            .where(
+                Document.id == UUID(document_id),
+                Document.status != FileStatus.CANCELLING.value,
+            )
+            .values(status=status, updated_at=func.now())
+            .execution_options(synchronize_session="fetch")
         )
-    except Exception as e:
-        logging.getLogger("memory_rag.pipeline").warning(
-            "Failed to publish status to Redis for document %s: %s",
-            document_id,
-            e,
+        if result.rowcount == 0:
+            db_session.rollback()
+            raise DocumentCancellationRequested(
+                f"Document {document_id} was cancelled or deleted"
+            )
+        document = db_session.get(Document, UUID(document_id))
+        event = DocumentEventModel(
+            document_id=UUID(document_id),
+            workspace_id=document.workspace_id,
+            status=status,
+            stage=stage.value,
+            step=stage.step,
+            message=message or stage.message,
+            page_number=page_number,
+            total_pages=total_pages,
         )
+        db_session.add(event)
+        # Publish while the row lock from the conditional UPDATE is held, so a
+        # later cancellation event cannot be followed by stale worker progress.
+        publish_redis_status()
+        db_session.commit()
+    else:
+        publish_redis_status()
 
 
 def record_pipeline_failure(
@@ -117,14 +165,15 @@ def record_pipeline_failure(
     try:
         with get_sync_db() as db_session:
             document = db_session.get(Document, UUID(document_id), with_for_update=True)
-            if document is None or (
-                expected_status and document.status != expected_status.value
+            if (
+                document is None
+                or (expected_status and document.status != expected_status.value)
+                or document.status == FileStatus.CANCELLING.value
             ):
                 return
             if not workspace_name:
                 workspace = db_session.get(WorkspaceModel, document.workspace_id)
                 workspace_name = workspace.name if workspace else ""
-            document.status = FileStatus.FAILED.value
             document.last_error = message
             _publish_status(
                 document_id,
@@ -155,10 +204,79 @@ def _usable_ocr(storage_key: str | None) -> bool:
         return False
 
 
+def _prepare_replacement(
+    db_session: Session, document: Document, upload_task_id: UUID
+) -> None:
+    """Remove stale artifacts after the current task has claimed the document."""
+    cleanup_message = f"Replacement cleanup finished for upload {upload_task_id}"
+    document_id = document.id
+    workspace_id = document.workspace_id
+    source_key = document.storage_key
+    cleaned = db_session.scalar(
+        select(DocumentEventModel.id)
+        .where(
+            DocumentEventModel.document_id == document_id,
+            DocumentEventModel.status == "replacement_cleanup_finished",
+            DocumentEventModel.message == cleanup_message,
+        )
+        .limit(1)
+    )
+    db_session.commit()
+    if cleaned is not None:
+        return
+
+    if not object_exists(source_key):
+        raise FileNotFoundError(
+            f"Staged replacement for document {document_id} is missing from storage"
+        )
+    delete_document_embeddings(str(document_id), str(workspace_id))
+    delete_prefix(
+        document_object_prefix(workspace_id, document_id) + "/",
+        exclude_keys={source_key},
+    )
+
+    current = db_session.get(
+        Document, document_id, with_for_update=True, populate_existing=True
+    )
+    if (
+        current is None
+        or current.status == FileStatus.CANCELLING.value
+        or current.storage_key != source_key
+    ):
+        raise DocumentCancellationRequested(str(document_id))
+    db_session.execute(
+        update(DocumentEventModel)
+        .where(DocumentEventModel.document_id == document_id)
+        .values(document_split_id=None, translation_id=None)
+    )
+    db_session.execute(
+        delete(DocumentSplitModel).where(DocumentSplitModel.document_id == document_id)
+    )
+    db_session.execute(
+        delete(Document).where(Document.parent_document_id == document_id)
+    )
+    db_session.add(
+        DocumentEventModel(
+            document_id=document_id,
+            workspace_id=workspace_id,
+            status="replacement_cleanup_finished",
+            stage=FilePipelineStage.OBJECT_STORAGE.value,
+            step=FilePipelineStage.OBJECT_STORAGE.step,
+            message=cleanup_message,
+            total_pages=document.page_count,
+        )
+    )
+    db_session.commit()
+    logging.getLogger("memory_rag.pipeline").info(
+        "Removed stale artifacts for replacement document %s", document_id
+    )
+
+
 def _run_file_pipeline(
     task: Task,
     document_id: str,
     *,
+    upload_task_id: UUID | None = None,
     retry_task_id: UUID | None = None,
     resume_from: FilePipelineStage = FilePipelineStage.OBJECT_STORAGE,
 ) -> bool:
@@ -176,9 +294,29 @@ def _run_file_pipeline(
                 .with_for_update()
             )
             if document is None:
-                if resume:
-                    return False
-                raise ValueError(f"Document {document_id} not found")
+                return False
+
+            latest_upload = db_session.scalar(
+                select(DocumentEventModel)
+                .where(
+                    DocumentEventModel.document_id == document.id,
+                    DocumentEventModel.status == FileStatus.FILE_UPLOADED.value,
+                )
+                .order_by(
+                    DocumentEventModel.created_at.desc(),
+                    DocumentEventModel.id.desc(),
+                )
+                .limit(1)
+            )
+            replacement_task_id = None
+            if (
+                latest_upload is not None
+                and latest_upload.message == REPLACEMENT_UPLOAD_MESSAGE
+                and document.stored_filename.startswith(
+                    f"{document.id}_replacement-{latest_upload.id}"
+                )
+            ):
+                replacement_task_id = latest_upload.id
 
             if resume:
                 event = db_session.scalar(
@@ -200,9 +338,18 @@ def _run_file_pipeline(
                 ):
                     return False
                 document.status = FileStatus.RETRY_RUNNING.value
-            elif document.status != FileStatus.FILE_UPLOADED.value:
-                return False
             else:
+                if (
+                    document.status != FileStatus.FILE_UPLOADED.value
+                    or (
+                        upload_task_id is not None
+                        and (
+                            latest_upload is None or latest_upload.id != upload_task_id
+                        )
+                    )
+                    or (upload_task_id is None and replacement_task_id is not None)
+                ):
+                    return False
                 document.status = FileStatus.FILE_PROCESSING.value
 
             document.attempt_count += 1
@@ -223,7 +370,6 @@ def _run_file_pipeline(
             ) -> None:
                 nonlocal stage, current_page
                 stage, current_page = next_stage, page
-                document.status = status.value
                 _publish_status(
                     document_id,
                     stage,
@@ -237,7 +383,14 @@ def _run_file_pipeline(
                 )
                 task.update_state(state="PROGRESS", meta={"stage": stage.value})
 
-            if resume:
+            if replacement_task_id is not None:
+                progress(
+                    FilePipelineStage.OBJECT_STORAGE,
+                    "Preparing the replacement and checking previous artifacts...",
+                    FileStatus.RETRY_RUNNING if resume else FileStatus.FILE_PROCESSING,
+                )
+                _prepare_replacement(db_session, document, replacement_task_id)
+            elif resume:
                 progress(
                     stage,
                     "Retry started. Checking saved progress...",
@@ -314,6 +467,7 @@ def _run_file_pipeline(
             document.page_count = expected_pages
             db_session.commit()
 
+            ocr_model = get_model_names_sync()[ModelRole.OCR]
             with tempfile.TemporaryDirectory(prefix="ocr-inputs-") as temp_dir:
                 for split in splits:
                     page = split.page_number
@@ -346,6 +500,7 @@ def _run_file_pipeline(
 
                     text = extract_image_text(
                         image_path,
+                        model_name=ocr_model,
                         document_id=document_id,
                         page_number=page,
                         on_retry=publish_retry,
@@ -400,6 +555,11 @@ def _run_file_pipeline(
                 else FileStatus.FILE_PROCESS_FINISHED,
             )
             return True
+    except DocumentCancellationRequested:
+        logging.getLogger("memory_rag.pipeline").info(
+            "Stopping document %s after cancellation was requested", document_id
+        )
+        return False
     except Exception as exc:
         if claimed:
             record_pipeline_failure(
@@ -409,11 +569,14 @@ def _run_file_pipeline(
 
 
 @celery_app.task(name="workers.tasks.process_file_upload", bind=True)
-def process_file_upload(self: Task, document_id: str) -> None:
+def process_file_upload(
+    self: Task, document_id: str, upload_task_id: str | None = None
+) -> None:
     from workers.tasks.save_data import run_indexing
 
     with document_worker_lock(document_id):
-        if not _run_file_pipeline(self, document_id):
+        upload_uuid = UUID(upload_task_id) if upload_task_id else None
+        if not _run_file_pipeline(self, document_id, upload_task_id=upload_uuid):
             return
         run_indexing(self, document_id)
 
@@ -430,3 +593,135 @@ def retry_document(self: Task, document_id: str, resume_from: str) -> None:
             resume_from=FilePipelineStage(resume_from),
         ):
             run_indexing(self, document_id, count_attempt=False)
+
+
+def _publish_cancelled(document_id: str) -> None:
+    payload = {
+        "status": FileStatus.CANCELLED.value,
+        "document_id": document_id,
+        "message": "Document upload was cancelled and removed.",
+        "timestamp": datetime.now().isoformat(),
+    }
+    try:
+        redis_client.delete(f"document_task:{document_id}")
+        redis_client.publish(f"document_updates:{document_id}", json.dumps(payload))
+    except Exception:
+        logging.getLogger("memory_rag.pipeline").warning(
+            "Could not publish cancellation completion for document %s",
+            document_id,
+            exc_info=True,
+        )
+
+
+def _record_cancellation_cleanup_error(document_id: str, error: Exception) -> None:
+    message = f"Cancellation cleanup failed: {str(error)[:1800]}"
+    try:
+        with get_sync_db() as db_session:
+            document = db_session.get(Document, UUID(document_id), with_for_update=True)
+            if document is None or document.status != FileStatus.CANCELLING.value:
+                return
+            document.last_error = message
+            db_session.add(
+                DocumentEventModel(
+                    document_id=document.id,
+                    workspace_id=document.workspace_id,
+                    status=FileStatus.CANCELLING.value,
+                    message=message,
+                )
+            )
+            db_session.commit()
+        redis_client.publish(
+            f"document_updates:{document_id}",
+            json.dumps(
+                {
+                    "status": FileStatus.CANCELLING.value,
+                    "document_id": document_id,
+                    "message": message,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            ),
+        )
+    except Exception:
+        logging.getLogger("memory_rag.pipeline").exception(
+            "Could not record cancellation cleanup error for document %s",
+            document_id,
+        )
+
+
+@celery_app.task(name="workers.tasks.cancel_document", bind=True)
+def cancel_document_upload(
+    self: Task, document_id: str, cleanup_attempt: int = 0
+) -> None:
+    """Delete all external artifacts, then remove a cancelled document record."""
+    logger = logging.getLogger("memory_rag.pipeline")
+    try:
+        with try_document_worker_lock(document_id) as acquired:
+            if not acquired:
+                logger.info(
+                    "Cancellation cleanup for document %s is waiting for its worker",
+                    document_id,
+                )
+                try:
+                    self.apply_async(args=[document_id, cleanup_attempt], countdown=3)
+                except Exception as exc:
+                    logger.exception(
+                        "Could not reschedule cancellation cleanup for %s",
+                        document_id,
+                    )
+                    _record_cancellation_cleanup_error(document_id, exc)
+                return
+
+            with get_sync_db() as db_session:
+                document = db_session.get(
+                    Document, UUID(document_id), with_for_update=True
+                )
+                if document is None:
+                    _publish_cancelled(document_id)
+                    return
+                if document.status != FileStatus.CANCELLING.value:
+                    return
+                workspace_id = document.workspace_id
+
+            delete_document_embeddings(str(document_id), str(workspace_id))
+            deleted_objects = delete_prefix(
+                document_object_prefix(workspace_id, UUID(document_id)) + "/"
+            )
+
+            with get_sync_db() as db_session:
+                document = db_session.get(
+                    Document, UUID(document_id), with_for_update=True
+                )
+                if document is None:
+                    _publish_cancelled(document_id)
+                    return
+                if document.status != FileStatus.CANCELLING.value:
+                    return
+                db_session.delete(document)
+                db_session.commit()
+
+            _publish_cancelled(document_id)
+            logger.info(
+                "Cancelled document %s; removed %d Garage objects and "
+                "its Qdrant vectors",
+                document_id,
+                deleted_objects,
+            )
+    except Exception as exc:
+        if cleanup_attempt < 5:
+            logger.warning(
+                "Cancellation cleanup attempt %d failed for document %s: %s",
+                cleanup_attempt + 1,
+                document_id,
+                exc,
+            )
+            try:
+                self.apply_async(
+                    args=[document_id, cleanup_attempt + 1],
+                    countdown=min(15 * (cleanup_attempt + 1), 60),
+                )
+                return
+            except Exception:
+                logger.exception(
+                    "Could not reschedule cancellation cleanup for %s", document_id
+                )
+        _record_cancellation_cleanup_error(document_id, exc)

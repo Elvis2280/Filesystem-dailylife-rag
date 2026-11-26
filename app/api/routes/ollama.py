@@ -1,29 +1,33 @@
 """Ollama status, installed models, and server-wide model preferences."""
 
 import asyncio
+import logging
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.validators import validate_image_type
-from app.core.config import settings
 from app.core.database import get_db
 from app.models.ollama_model_preferences import OllamaModelPreferences
 from app.schemas.ollama import (
     OllamaFileOcrResponse,
     OllamaModelInfo,
+    OllamaModelPreferenceUpdate,
     OllamaPreferencesResponse,
     OllamaPreferencesUpdate,
     OllamaStatusResponse,
 )
 from app.services.ai.model_preferences import (
     EDITABLE_ROLES,
-    PREFERENCE_FIELDS,
     ModelRole,
+    effective_model_preferences,
+    environment_model_name,
     get_model_name_async,
+    save_model_preferences,
 )
 from app.services.ai.ollama_client import (
     OllamaClient,
@@ -34,30 +38,39 @@ from app.services.ocr.file_ocr_llm import extract_image_text
 
 router = APIRouter(prefix="/ollama", tags=["Ollama"])
 dev_router = APIRouter(prefix="/ollama", tags=["Ollama"])
+logger = logging.getLogger("memory_rag.ollama_api")
 
-_RECOMMENDED_MODELS = {
-    ModelRole.OCR: settings.OLLAMA_MODEL_OCR,
-    ModelRole.TRANSLATION: settings.OLLAMA_MODEL_TRANSLATION,
-    ModelRole.EMBEDDING: settings.OLLAMA_MODEL_EMBEDDING,
-    ModelRole.ANSWER: settings.OLLAMA_MODEL_AGENT,
-    ModelRole.FORMATTING: settings.OLLAMA_MODEL_FORMAT,
-    ModelRole.CLEANING: settings.OLLAMA_MODEL_CLEANER,
-}
-_SELECTED_FIELDS = {role: field for role, field in PREFERENCE_FIELDS.items()}
+_RECOMMENDED_MODELS = {role: environment_model_name(role) for role in ModelRole}
 
 
 def _response_preferences(
-    preferences: OllamaModelPreferences,
+    preferences: OllamaModelPreferences | None,
 ) -> OllamaPreferencesResponse:
+    effective = effective_model_preferences(preferences)
     return OllamaPreferencesResponse(
-        ocr=preferences.ocr_model,
-        translation=preferences.translation_model,
-        embedding=preferences.embedding_model,
-        answer=preferences.answer_model,
-        formatting=preferences.formatting_model,
-        cleaning=preferences.cleaning_model,
+        ocr=effective[ModelRole.OCR.value],
+        translation=effective[ModelRole.TRANSLATION.value],
+        embedding=effective[ModelRole.EMBEDDING.value],
+        answer=effective[ModelRole.ANSWER.value],
+        formatting=effective[ModelRole.FORMATTING.value],
+        cleaning=effective[ModelRole.CLEANING.value],
         editable_roles=[role.value for role in EDITABLE_ROLES],
     )
+
+
+async def _read_preferences(
+    db: AsyncSession,
+) -> OllamaModelPreferences | None:
+    try:
+        return await db.scalar(
+            select(OllamaModelPreferences).where(OllamaModelPreferences.id == 1)
+        )
+    except SQLAlchemyError as exc:
+        logger.exception("Could not read Ollama model preferences")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Model preference database is unavailable",
+        ) from exc
 
 
 def _role_eligible(role: ModelRole, capabilities: set[str]) -> bool:
@@ -148,18 +161,8 @@ async def ollama_status(
     db: AsyncSession = Depends(get_db),
 ) -> OllamaStatusResponse:
     """Return Ollama connectivity, installed models, and current selections."""
-    preferences = await db.scalar(
-        select(OllamaModelPreferences).where(OllamaModelPreferences.id == 1)
-    )
-    if preferences is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Ollama model preferences are not initialized",
-        )
-    selected_models = {
-        role.value: getattr(preferences, field)
-        for role, field in _SELECTED_FIELDS.items()
-    }
+    preferences = await _read_preferences(db)
+    selected_models = effective_model_preferences(preferences)
 
     health = await ollama.health_check()
     if not health.is_reachable:
@@ -197,35 +200,39 @@ async def ollama_status(
 async def get_ollama_preferences(
     db: AsyncSession = Depends(get_db),
 ) -> OllamaPreferencesResponse:
-    preferences = await db.scalar(
-        select(OllamaModelPreferences).where(OllamaModelPreferences.id == 1)
-    )
-    if preferences is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Ollama model preferences are not initialized",
-        )
+    preferences = await _read_preferences(db)
     return _response_preferences(preferences)
 
 
-@router.patch("/preferences", response_model=OllamaPreferencesResponse)
-async def update_ollama_preferences(
-    update: OllamaPreferencesUpdate,
-    ollama: OllamaClient = Depends(get_ollama_client),
-    db: AsyncSession = Depends(get_db),
+async def _update_model_preferences(
+    updates: dict[ModelRole, str],
+    ollama: OllamaClient,
+    db: AsyncSession,
 ) -> OllamaPreferencesResponse:
-    updates = {
-        key: value.strip()
-        for key, value in update.model_dump(exclude_unset=True).items()
-        if value is not None
-    }
     if not updates or any(not value for value in updates.values()):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Provide at least one non-empty editable model preference",
         )
+    if any(role not in EDITABLE_ROLES for role in updates):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="One or more destinations cannot be edited",
+        )
+    if any(len(value) > 255 for value in updates.values()):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Model names must be at most 255 characters long",
+        )
 
-    health = await ollama.health_check()
+    try:
+        health = await ollama.health_check()
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        logger.exception("Could not check Ollama before updating model preferences")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ollama server is not reachable",
+        ) from exc
     if not health.is_reachable:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -233,8 +240,7 @@ async def update_ollama_preferences(
         )
 
     installed_models = set(health.available_models)
-    for role_name, model_name in updates.items():
-        role = ModelRole(role_name)
+    for role, model_name in updates.items():
         if not model_is_available(model_name, installed_models):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -242,17 +248,26 @@ async def update_ollama_preferences(
             )
         try:
             model_details = await ollama.show_model(model_name)
-        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        except (httpx.HTTPError, RuntimeError, ValueError, TypeError) as exc:
+            logger.exception(
+                "Could not read Ollama capabilities for model %s", model_name
+            )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Could not read capabilities for model '{model_name}'",
             ) from exc
-        raw_capabilities = model_details.get("capabilities", [])
-        capabilities = (
-            {value for value in raw_capabilities if isinstance(value, str)}
-            if isinstance(raw_capabilities, list)
-            else set()
-        )
+        raw_capabilities = model_details.get("capabilities")
+        if not isinstance(raw_capabilities, list) or any(
+            not isinstance(value, str) for value in raw_capabilities
+        ):
+            logger.warning(
+                "Ollama returned malformed capabilities for model %s", model_name
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Could not read capabilities for model '{model_name}'",
+            )
+        capabilities = set(raw_capabilities)
         if not _role_eligible(role, capabilities):
             needed = (
                 "vision and text generation"
@@ -264,28 +279,51 @@ async def update_ollama_preferences(
                 detail=f"Model '{model_name}' does not advertise {needed} capability",
             )
 
-    preferences = await db.scalar(
-        select(OllamaModelPreferences)
-        .where(OllamaModelPreferences.id == 1)
-        .with_for_update()
-    )
+    try:
+        preferences = await save_model_preferences(updates, db)
+    except SQLAlchemyError as exc:
+        logger.exception("Could not save Ollama model preferences")
+        try:
+            await db.rollback()
+        except SQLAlchemyError:
+            logger.exception("Could not roll back the Ollama preference update")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Model preference database is unavailable",
+        ) from exc
     if preferences is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Ollama model preferences are not initialized",
         )
 
-    role_fields = {
-        "ocr": "ocr_model",
-        "translation": "translation_model",
-        "answer": "answer_model",
-    }
-    for role_name, model_name in updates.items():
-        setattr(preferences, role_fields[role_name], model_name)
-
-    await db.commit()
-    await db.refresh(preferences)
     return _response_preferences(preferences)
+
+
+@router.patch("/preferences", response_model=OllamaPreferencesResponse)
+async def update_ollama_preferences(
+    update: OllamaPreferencesUpdate,
+    ollama: OllamaClient = Depends(get_ollama_client),
+    db: AsyncSession = Depends(get_db),
+) -> OllamaPreferencesResponse:
+    updates = {
+        ModelRole(key): value.strip()
+        for key, value in update.model_dump(exclude_unset=True).items()
+        if value is not None
+    }
+    return await _update_model_preferences(updates, ollama, db)
+
+
+@router.patch("/preferences/model", response_model=OllamaPreferencesResponse)
+async def update_ollama_model_preference(
+    update: OllamaModelPreferenceUpdate,
+    ollama: OllamaClient = Depends(get_ollama_client),
+    db: AsyncSession = Depends(get_db),
+) -> OllamaPreferencesResponse:
+    """Select the installed Ollama model for one task."""
+    destination = update.destination
+    role = ModelRole.ANSWER if destination == "agent" else ModelRole(destination)
+    return await _update_model_preferences({role: update.model}, ollama, db)
 
 
 @dev_router.post(

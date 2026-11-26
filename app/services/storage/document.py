@@ -54,6 +54,7 @@ async def process_document_upload(
     db: AsyncSession,
 ) -> tuple[Document, str]:
     document_id = uuid.uuid4()
+    task_id = uuid.uuid4()
     workspace_uuid = uuid.UUID(workspace_id)
     uploaded_name = Path(file.filename or "unnamed").name
     ext = uploaded_name.rsplit(".", 1)[-1].lower() if "." in uploaded_name else ""
@@ -129,6 +130,7 @@ async def process_document_upload(
     db.add_all(
         [
             DocumentEventModel(
+                id=task_id,
                 document_id=document_id,
                 workspace_id=workspace_uuid,
                 status="file_uploaded",
@@ -159,7 +161,9 @@ async def process_document_upload(
         process_file_upload as dispatch_pipeline_task,
     )
 
-    task = dispatch_pipeline_task.delay(str(document_id))
+    task = dispatch_pipeline_task.apply_async(
+        args=[str(document_id), str(task_id)], task_id=str(task_id)
+    )
     redis_client.setex(f"document_task:{document_id}", 1800, task.id)
     return document, task.id
 

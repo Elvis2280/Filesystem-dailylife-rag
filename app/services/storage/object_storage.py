@@ -209,8 +209,12 @@ def delete_object(key: str) -> None:
         raise ObjectStorageError(f"Failed to delete object '{object_key}'") from exc
 
 
-def delete_prefix(prefix: str = "") -> int:
+def delete_prefix(prefix: str = "", *, exclude_keys: set[str] | None = None) -> int:
+    preserve_boundary = prefix.endswith("/")
     object_prefix = _validated_key(prefix, allow_empty=True)
+    excluded = exclude_keys or set()
+    if preserve_boundary and object_prefix:
+        object_prefix += "/"
     client = get_object_storage_client()
     deleted = 0
     try:
@@ -219,7 +223,11 @@ def delete_prefix(prefix: str = "") -> int:
             Bucket=settings.OBJECT_STORAGE_BUCKET,
             Prefix=object_prefix,
         ):
-            objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]
+            objects = [
+                {"Key": item["Key"]}
+                for item in page.get("Contents", [])
+                if item["Key"] not in excluded
+            ]
             if not objects:
                 continue
             response = client.delete_objects(

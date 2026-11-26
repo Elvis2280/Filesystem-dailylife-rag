@@ -3,7 +3,7 @@ from app.services.ai.model_preferences import ModelRole, get_model_name_sync
 from app.services.ai.ollama_sync import OllamaSyncClient
 
 
-def clean_text(content: str) -> str:
+def clean_text(content: str, *, model_name: str | None = None) -> str:
     """Clean raw OCR text by removing isolated floating numbers/labels.
 
     Calls the qwen2.5:1.5b model with CLEANING_PROMPT and the input text.
@@ -12,6 +12,6 @@ def clean_text(content: str) -> str:
     """
     client = OllamaSyncClient()
     return client.generate(
-        model=get_model_name_sync(ModelRole.CLEANING),
+        model=model_name or get_model_name_sync(ModelRole.CLEANING),
         prompt=(CLEANING_PROMPT + "\n\n" + content),
     )

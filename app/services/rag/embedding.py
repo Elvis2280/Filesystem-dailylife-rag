@@ -6,7 +6,7 @@ from app.services.ai.ollama_sync import OllamaSyncClient
 logger = logging.getLogger("memory_rag.embedding")
 
 
-def embedding(texts: list[str]) -> list[list[float]]:
+def embedding(texts: list[str], *, model_name: str | None = None) -> list[list[float]]:
     """Generate bge-m3 embeddings for a batch of texts via Ollama.
 
     Args:
@@ -31,7 +31,7 @@ def embedding(texts: list[str]) -> list[list[float]]:
     client = OllamaSyncClient()
     try:
         return client.embed(
-            model=get_model_name_sync(ModelRole.EMBEDDING),
+            model=model_name or get_model_name_sync(ModelRole.EMBEDDING),
             input=texts,
         )
     except RuntimeError as e:

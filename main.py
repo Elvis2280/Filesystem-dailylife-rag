@@ -23,6 +23,7 @@ Startup Validation:
     Raises RuntimeError if any critical dependency is missing.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -31,6 +32,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes.chat import router as chat_router
 from app.api.routes.document import router as document_router
+from app.api.routes.history import router as history_router
 from app.api.routes.ollama import router as ollama_router
 from app.api.routes.workspace import router as workspace_router
 from app.core.api_key import is_api_key_valid
@@ -56,9 +58,13 @@ async def lifespan(app: FastAPI):
     report = await validate_all()
 
     if report.get("postgres_db"):
-        from app.services.ai.model_preferences import ensure_model_preferences_storage
+        from app.services.ai.model_preferences import (
+            ensure_model_preferences_storage,
+            start_model_preference_listener,
+        )
 
         ensure_model_preferences_storage()
+        start_model_preference_listener()
 
     # --- Directory Validation ---
     dir_report = report["directories_created"]
@@ -93,21 +99,27 @@ async def lifespan(app: FastAPI):
     # --- Ollama Model Availability Check ---
     from app.services.ai.ollama_client import OllamaClient
     from app.services.ai.model_names import model_is_available
-    from app.services.ai.model_preferences import get_preferences_async
+    from app.services.ai.model_preferences import (
+        ModelRole,
+        effective_model_preferences,
+        get_preferences_async,
+    )
 
     ollama = OllamaClient()
     health_resp = await ollama.health_check()
-    preferences = await get_preferences_async() if report.get("postgres_db") else None
+    database_available = report.get("postgres_db", False)
+    preferences = await get_preferences_async() if database_available else None
     if health_resp.is_reachable:
         logger.info("Ollama: connected at %s", settings.OLLAMA_URL)
-        if preferences is not None:
+        if database_available:
+            effective_models = effective_model_preferences(preferences)
             selected_models = {
-                "OCR": preferences.ocr_model,
-                "Translation": preferences.translation_model,
-                "Embedding": preferences.embedding_model,
-                "Answer": preferences.answer_model,
-                "Formatting": preferences.formatting_model,
-                "Cleaning": preferences.cleaning_model,
+                "OCR": effective_models[ModelRole.OCR.value],
+                "Translation": effective_models[ModelRole.TRANSLATION.value],
+                "Embedding": effective_models[ModelRole.EMBEDDING.value],
+                "Answer": effective_models[ModelRole.ANSWER.value],
+                "Formatting": effective_models[ModelRole.FORMATTING.value],
+                "Cleaning": effective_models[ModelRole.CLEANING.value],
             }
             for role, model_name in selected_models.items():
                 if model_is_available(model_name, set(health_resp.available_models)):
@@ -134,8 +146,10 @@ async def lifespan(app: FastAPI):
     finally:
         # ── Shutdown ──
         from app.core.redis_client import close_async_redis_client
+        from app.services.ai.model_preferences import stop_model_preference_listener
         from app.services.chat.jobs import chat_jobs
 
+        await asyncio.to_thread(stop_model_preference_listener)
         await chat_jobs.redis.aclose()
         await close_async_redis_client()
 
@@ -197,6 +211,7 @@ if settings.IS_DEVELOPMENT:
 app.include_router(chat_router)
 app.include_router(workspace_router)
 app.include_router(document_router)
+app.include_router(history_router)
 
 
 @app.get("/")

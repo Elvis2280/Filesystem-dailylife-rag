@@ -1,4 +1,11 @@
+from typing import Annotated, Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.types import StringConstraints
+
+ModelName = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
+]
 
 
 class OllamaModelInfo(BaseModel):
@@ -47,9 +54,20 @@ class OllamaPreferencesResponse(BaseModel):
 class OllamaPreferencesUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    ocr: str | None = None
-    translation: str | None = None
-    answer: str | None = None
+    ocr: ModelName | None = None
+    translation: ModelName | None = None
+    answer: ModelName | None = None
+    formatting: ModelName | None = None
+    cleaning: ModelName | None = None
+
+
+class OllamaModelPreferenceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: ModelName
+    destination: Literal[
+        "ocr", "translation", "agent", "answer", "formatting", "cleaning"
+    ]
 
 
 class OllamaFileOcrResponse(BaseModel):

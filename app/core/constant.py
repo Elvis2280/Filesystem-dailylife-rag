@@ -11,6 +11,8 @@ class FileStatus(str, Enum):
     FILE_PROCESSING = "file_processing"
     RETRY_QUEUED = "retry_queued"
     RETRY_RUNNING = "retry_running"
+    CANCELLING = "cancelling"
+    CANCELLED = "cancelled"
     FILE_CONVERSION_STARTED = "file_conversion_started"
     FILE_CONVERSION_FINISHED = "file_conversion_finished"
     OCR_STARTED = "ocr_started"
@@ -21,6 +23,9 @@ class FileStatus(str, Enum):
     INDEXING = "indexing"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+REPLACEMENT_UPLOAD_MESSAGE = "Replacement file received"
 
 
 # --- File Pipeline Stages ---

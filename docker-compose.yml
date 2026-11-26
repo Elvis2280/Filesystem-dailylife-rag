@@ -123,6 +123,8 @@ services:
         condition: service_healthy
     volumes:
       - model_cache:/home/appuser/.cache
+      - ./app:/app/app
+      - ./workers:/app/workers
       - ./temp_storage:/app/temp_storage
     networks:
       - backend
@@ -154,6 +156,8 @@ services:
         condition: service_healthy
     volumes:
       - model_cache:/home/appuser/.cache
+      - ./app:/app/app
+      - ./workers:/app/workers
       - ./temp_storage:/app/temp_storage
     networks:
       - backend

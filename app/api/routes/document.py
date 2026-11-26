@@ -1,11 +1,13 @@
 import asyncio
+import json
 import logging
 import shutil
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import datetime, timezone
 from email.utils import format_datetime
 from pathlib import Path, PurePath
 from urllib.parse import quote
@@ -17,7 +19,6 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
-    Query,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -25,12 +26,18 @@ from fastapi import (
 )
 from fastapi.responses import Response, StreamingResponse
 from redis.exceptions import RedisError
-from sqlalchemy import func, select, tuple_, update
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.api_key import is_api_key_valid
-from app.core.constant import ALLOWED_UPLOAD_MIME_TYPES, FilePipelineStage, FileStatus
-from app.core.database import get_db
+from app.core.constant import (
+    ALLOWED_UPLOAD_MIME_TYPES,
+    FilePipelineStage,
+    FileStatus,
+    REPLACEMENT_UPLOAD_MESSAGE,
+)
+from app.core.database import async_engine, get_db
+from app.core.document_lock import document_lock_key
 from app.core.redis_client import get_async_redis_client, redis_client
 from app.models.document import Document
 from app.models.document_event import DocumentEventModel
@@ -38,50 +45,50 @@ from app.models.document_split import DocumentSplitModel
 from app.models.translation import TranslationModel
 from app.models.workspace import WorkspaceModel
 from app.schemas.document import (
-    DocumentHistoryEvent,
-    DocumentHistoryResponse,
+    DocumentCancelResponse,
     DocumentRetryResponse,
     DocumentStatusResponse,
     DocumentUploadResponse,
     FileConversionPayload,
     FileConversionResponse,
 )
+from app.services.document_status import (
+    document_failure_message,
+    document_has_recent_activity,
+    document_worker_is_active,
+    reconcile_replacement_start_failure,
+    resolve_document_status,
+)
 from app.services.storage.document import (
     DuplicateDocumentError,
     convert_to_pdf,
     process_document_upload,
 )
-from app.services.storage.file_metadata import (
-    document_object_prefix,
-    original_document_key,
-    sha256_file,
-)
-from app.services.storage.object_storage import delete_prefix, put_file
-from app.services.rag.qdrant_client import delete_document_embeddings
 from app.services.storage.document_preview import (
     PdfPreviewNotFound,
     resolve_pdf_document,
+)
+from app.services.storage.file_metadata import (
+    original_document_key,
+    sha256_file,
 )
 from app.services.storage.image_preview import (
     ImagePreviewNotFound,
     resolve_split_image,
 )
-from app.services.storage.translation_preview import (
-    TranslationPreviewNotFound,
-    resolve_translation,
-)
-from app.services.document_status import (
-    document_failure_message,
-    document_has_recent_activity,
-    document_worker_is_active,
-    resolve_document_status,
-)
 from app.services.storage.object_storage import (
     OBJECT_STREAM_CHUNK_SIZE,
     ObjectMetadata,
     ObjectStorageError,
+    delete_object,
     get_object_stream,
     head_object,
+    object_exists,
+    put_file,
+)
+from app.services.storage.translation_preview import (
+    TranslationPreviewNotFound,
+    resolve_translation,
 )
 from app.services.websocket.document_status import stream_document_status
 from workers.celery_app import celery_app
@@ -96,6 +103,21 @@ def _is_valid_uuid(value: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+@asynccontextmanager
+async def _try_document_processing_lock(document_id: uuid.UUID) -> AsyncIterator[bool]:
+    """Share the worker advisory lock with API operations that touch artifacts."""
+    key = document_lock_key(document_id)
+    async with async_engine.connect() as connection:
+        acquired = bool(await connection.scalar(select(func.pg_try_advisory_lock(key))))
+        await connection.commit()
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                await connection.scalar(select(func.pg_advisory_unlock(key)))
+                await connection.commit()
 
 
 @dataclass(frozen=True)
@@ -468,7 +490,12 @@ async def replace_document(
         raise HTTPException(
             status_code=409, detail="Only original documents can be replaced"
         )
+    if await document_worker_is_active(db, document):
+        raise HTTPException(
+            status_code=409, detail="Document is currently being processed"
+        )
     busy_statuses = {
+        FileStatus.CANCELLING.value,
         FileStatus.RETRY_QUEUED.value,
         FileStatus.RETRY_RUNNING.value,
         FileStatus.FILE_PROCESSING.value,
@@ -490,11 +517,15 @@ async def replace_document(
         )
 
     uploaded_name = None
+    uploaded_object = False
+    task_id = uuid.uuid4()
     try:
         uploaded_name = PurePath(file.filename or "unnamed").name
         ext = uploaded_name.rsplit(".", 1)[-1].lower() if "." in uploaded_name else ""
         stored_filename = (
-            f"{document.id}_original.{ext}" if ext else f"{document.id}_original"
+            f"{document.id}_replacement-{task_id}.{ext}"
+            if ext
+            else f"{document.id}_replacement-{task_id}"
         )
         with tempfile.TemporaryDirectory(prefix="replace-") as temp_dir:
             source_path = Path(temp_dir) / stored_filename
@@ -520,29 +551,16 @@ async def replace_document(
                 document.workspace_id, document.id, stored_filename
             )
             upload_received_at = await db.scalar(select(func.clock_timestamp()))
+            uploaded_object = True
             await asyncio.to_thread(
                 put_file,
                 source_path,
                 object_key,
                 file.content_type or "application/octet-stream",
             )
+            if not await asyncio.to_thread(object_exists, object_key):
+                raise ObjectStorageError("Replacement file was not persisted in Garage")
             try:
-                await asyncio.to_thread(
-                    delete_document_embeddings,
-                    str(document.id),
-                    str(document.workspace_id),
-                )
-                await asyncio.to_thread(
-                    delete_prefix,
-                    document_object_prefix(document.workspace_id, document.id) + "/",
-                )
-                await db.execute(
-                    update(DocumentEventModel)
-                    .where(DocumentEventModel.document_id == document.id)
-                    .values(document_split_id=None, translation_id=None)
-                )
-                await db.refresh(document, ["splits"])
-                document.splits.clear()
                 document.original_filename = uploaded_name
                 document.stored_filename = stored_filename
                 document.storage_key = object_key
@@ -560,36 +578,59 @@ async def replace_document(
                 document.last_error = None
                 db.add(
                     DocumentEventModel(
+                        id=task_id,
                         document_id=document.id,
                         workspace_id=document.workspace_id,
                         status="file_uploaded",
                         stage=FilePipelineStage.UPLOAD.value,
                         step=FilePipelineStage.UPLOAD.step,
-                        message="Replacement file received",
+                        message=REPLACEMENT_UPLOAD_MESSAGE,
                         created_at=upload_received_at,
                     )
+                )
+                await db.flush()
+                await asyncio.to_thread(
+                    celery_app.send_task,
+                    "workers.tasks.process_file_upload",
+                    args=[str(document.id), str(task_id)],
+                    task_id=str(task_id),
+                    retry=False,
+                    ignore_result=False,
                 )
                 await db.commit()
             except Exception:
                 await db.rollback()
                 raise
     except HTTPException:
+        if uploaded_object:
+            try:
+                await asyncio.to_thread(delete_object, object_key)
+            except Exception:
+                logger.exception(
+                    "Could not remove staged replacement object for document %s",
+                    document_id,
+                )
         raise
     except Exception as exc:
+        if uploaded_object:
+            try:
+                await asyncio.to_thread(delete_object, object_key)
+            except Exception:
+                logger.exception(
+                    "Could not remove staged replacement object for document %s",
+                    document_id,
+                )
         logger.exception("Document replacement failed document_id=%s", document_id)
         raise HTTPException(
             status_code=502,
-            detail="Replacement cleanup or storage failed; retry the request",
+            detail="Replacement upload or queue failed; retry the request",
         ) from exc
 
-    from workers.tasks.file_pipeline import process_file_upload
-
-    task = process_file_upload.delay(str(document.id))
-    redis_client.setex(f"document_task:{document.id}", 1800, task.id)
+    redis_client.setex(f"document_task:{document.id}", 1800, str(task_id))
     await db.refresh(document)
     return DocumentUploadResponse(
         document_id=str(document.id),
-        task_id=task.id,
+        task_id=str(task_id),
         workspace_id=str(document.workspace_id),
         original_filename=document.original_filename,
         mime_type=document.mime_type,
@@ -845,6 +886,106 @@ async def head_split_image(
 
 
 @router.post(
+    "/documents/{document_id}/cancel",
+    response_model=DocumentCancelResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def cancel_document_upload(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> DocumentCancelResponse:
+    if not _is_valid_uuid(document_id):
+        raise HTTPException(status_code=400, detail="document_id must be a valid UUID")
+    doc_id = uuid.UUID(document_id)
+    document = await db.scalar(
+        select(Document).where(Document.id == doc_id).with_for_update()
+    )
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if document.file_role != "original" or document.parent_document_id is not None:
+        raise HTTPException(
+            status_code=409, detail="Only original documents can be cancelled"
+        )
+    if document.status == FileStatus.COMPLETED.value:
+        raise HTTPException(
+            status_code=409, detail="Completed documents cannot be cancelled"
+        )
+
+    latest_event = await db.scalar(
+        select(DocumentEventModel)
+        .where(DocumentEventModel.document_id == doc_id)
+        .order_by(DocumentEventModel.created_at.desc(), DocumentEventModel.id.desc())
+        .limit(1)
+    )
+    task_id = uuid.uuid4()
+    message = "Cancellation requested. Waiting for active processing to stop."
+    document.status = FileStatus.CANCELLING.value
+    document.last_error = None
+    db.add(
+        DocumentEventModel(
+            id=task_id,
+            document_id=doc_id,
+            workspace_id=document.workspace_id,
+            status=FileStatus.CANCELLING.value,
+            stage=(
+                latest_event.stage if latest_event else FilePipelineStage.PENDING.value
+            ),
+            step=latest_event.step if latest_event else FilePipelineStage.PENDING.step,
+            message=message,
+            page_number=latest_event.page_number if latest_event else None,
+            total_pages=document.page_count,
+        )
+    )
+    try:
+        await db.flush()
+        await asyncio.to_thread(
+            celery_app.send_task,
+            "workers.tasks.cancel_document",
+            args=[str(doc_id)],
+            task_id=str(task_id),
+            retry=False,
+            ignore_result=False,
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("Could not queue cancellation for document %s", doc_id)
+        raise HTTPException(
+            status_code=503, detail="Could not queue document cancellation"
+        ) from exc
+
+    try:
+        redis_async = await get_async_redis_client()
+        await redis_async.publish(
+            f"document_updates:{doc_id}",
+            json.dumps(
+                {
+                    "status": FileStatus.CANCELLING.value,
+                    "stage": latest_event.stage if latest_event else None,
+                    "step": latest_event.step if latest_event else None,
+                    "stepTotal": FilePipelineStage.PENDING.step_total,
+                    "message": message,
+                    "document_id": str(doc_id),
+                    "original_filename": document.original_filename,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+        )
+    except Exception:
+        logger.warning(
+            "Could not publish cancellation status for document %s",
+            doc_id,
+            exc_info=True,
+        )
+
+    return DocumentCancelResponse(
+        document_id=str(doc_id),
+        task_id=str(task_id),
+        message=message,
+    )
+
+
+@router.post(
     "/documents/{document_id}/retry",
     response_model=DocumentRetryResponse,
     status_code=status.HTTP_202_ACCEPTED,
@@ -865,6 +1006,10 @@ async def retry_document(
         raise HTTPException(
             status_code=409, detail="Only original documents can be retried"
         )
+    if document.status == FileStatus.CANCELLING.value:
+        raise HTTPException(
+            status_code=409, detail="Document cancellation is in progress"
+        )
 
     latest_event = await db.scalar(
         select(DocumentEventModel)
@@ -872,6 +1017,9 @@ async def retry_document(
         .order_by(DocumentEventModel.created_at.desc(), DocumentEventModel.id.desc())
         .limit(1)
     )
+    failure = await reconcile_replacement_start_failure(db, document, latest_event)
+    if failure is not None:
+        latest_event = failure
     if await document_worker_is_active(db, document):
         raise HTTPException(status_code=409, detail="Document is still being processed")
 
@@ -1009,10 +1157,26 @@ async def get_document_status(
         .limit(1)
     )
     latest = await db.scalar(events)
-    retry_event = await db.scalar(
-        events.where(DocumentEventModel.status == FileStatus.RETRY_QUEUED.value)
+    failure = await reconcile_replacement_start_failure(db, document, latest)
+    if failure is not None:
+        await db.commit()
+        latest = failure
+    queued_event = await db.scalar(
+        events.where(
+            or_(
+                DocumentEventModel.status == FileStatus.RETRY_QUEUED.value,
+                (DocumentEventModel.status == FileStatus.FILE_UPLOADED.value)
+                & (DocumentEventModel.message == REPLACEMENT_UPLOAD_MESSAGE),
+            )
+        )
     )
-    task_id = str(retry_event.id) if retry_event is not None else None
+    task_id = str(queued_event.id) if queued_event is not None else None
+    if (
+        document.status == FileStatus.CANCELLING.value
+        and latest is not None
+        and latest.status == FileStatus.CANCELLING.value
+    ):
+        task_id = str(latest.id)
     if task_id is None:
         try:
             redis_async = await get_async_redis_client()
@@ -1027,7 +1191,11 @@ async def get_document_status(
     effective_status, worker_stopped = await resolve_document_status(
         db, document, latest
     )
-    if effective_status == FileStatus.FAILED.value:
+    if effective_status == FileStatus.CANCELLING.value:
+        task_state = "PROGRESS"
+        error = document.last_error
+        message = document.last_error or "Cancellation cleanup is in progress"
+    elif effective_status == FileStatus.FAILED.value:
         task_state = "FAILURE"
         error = document_failure_message(document, latest, worker_stopped)
         message = error
@@ -1051,43 +1219,6 @@ async def get_document_status(
         document_record_status=effective_status,
         error=error,
         message=message,
-    )
-
-
-@router.get("/documents/{document_id}/history", response_model=DocumentHistoryResponse)
-async def get_document_history(
-    document_id: uuid.UUID,
-    limit: int = Query(default=50, ge=1, le=200),
-    cursor: uuid.UUID | None = Query(default=None),
-    db: AsyncSession = Depends(get_db),
-) -> DocumentHistoryResponse:
-    if await db.get(Document, document_id) is None:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    events = select(DocumentEventModel).where(
-        DocumentEventModel.document_id == document_id
-    )
-    if cursor is not None:
-        previous = await db.scalar(events.where(DocumentEventModel.id == cursor))
-        if previous is None:
-            raise HTTPException(
-                status_code=400, detail="Invalid document history cursor"
-            )
-        events = events.where(
-            tuple_(DocumentEventModel.created_at, DocumentEventModel.id)
-            < (previous.created_at, previous.id)
-        )
-    rows = (
-        await db.scalars(
-            events.order_by(
-                DocumentEventModel.created_at.desc(), DocumentEventModel.id.desc()
-            ).limit(limit + 1)
-        )
-    ).all()
-    return DocumentHistoryResponse(
-        document_id=document_id,
-        events=[DocumentHistoryEvent.model_validate(event) for event in rows[:limit]],
-        next_cursor=rows[limit - 1].id if len(rows) > limit else None,
     )
 
 
@@ -1144,21 +1275,36 @@ async def convert_document(
             detail="document_id must be a valid UUID",
         )
 
-    try:
-        converted_metadata = await convert_to_pdf(doc_id, db)
-        return FileConversionResponse(
-            file_id=doc_id,
-            converted_file_path=converted_metadata.storage_key,
-            converted_mime_type=converted_metadata.mime_type,
-            converted_to_extension=converted_metadata.file_extension or "pdf",
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to convert file: {e}",
-        )
+    doc_uuid = uuid.UUID(doc_id)
+    async with _try_document_processing_lock(doc_uuid) as acquired:
+        if not acquired:
+            raise HTTPException(
+                status_code=409,
+                detail="Document is currently being processed",
+            )
+        document = await db.get(Document, doc_uuid)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        if document.status == FileStatus.CANCELLING.value:
+            raise HTTPException(
+                status_code=409, detail="Document cancellation is in progress"
+            )
+
+        try:
+            converted_metadata = await convert_to_pdf(doc_id, db)
+            return FileConversionResponse(
+                file_id=doc_id,
+                converted_file_path=converted_metadata.storage_key,
+                converted_mime_type=converted_metadata.mime_type,
+                converted_to_extension=converted_metadata.file_extension or "pdf",
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(e),
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to convert file: {e}",
+            )

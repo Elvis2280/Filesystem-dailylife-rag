@@ -16,7 +16,12 @@ _PROMPTS = {
 }
 
 
-def translate_content(content: str, lang: LanguageOptions) -> str:
+def translate_content(
+    content: str,
+    lang: LanguageOptions,
+    *,
+    model_name: str | None = None,
+) -> str:
     """Translate text content to the target language.
 
     Sync function intended for use in Celery worker tasks. Uses the
@@ -45,7 +50,7 @@ def translate_content(content: str, lang: LanguageOptions) -> str:
     client = OllamaSyncClient()
     try:
         return client.generate(
-            model=get_model_name_sync(ModelRole.TRANSLATION),
+            model=model_name or get_model_name_sync(ModelRole.TRANSLATION),
             prompt=prompt,
         )
     except RuntimeError as e:

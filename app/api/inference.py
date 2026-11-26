@@ -20,6 +20,10 @@ from app.core.config import settings
 from app.core.database import async_session
 from app.core.logging import configure_logging
 from app.services.chat.jobs import MAX_PENDING_JOBS, ChatJob, chat_jobs
+from app.services.ai.model_preferences import (
+    start_model_preference_listener,
+    stop_model_preference_listener,
+)
 
 logger = logging.getLogger("memory_rag.inference")
 
@@ -177,6 +181,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.LOG_LEVEL)
     if settings.INFERENCE_BASE_URL:
         raise RuntimeError("The dispatcher must connect directly to shared Ollama")
+    start_model_preference_listener()
     dispatcher = Dispatcher()
     app.state.dispatcher = dispatcher
     async with httpx.AsyncClient(
@@ -191,6 +196,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         finally:
             runner.cancel()
             await asyncio.gather(runner, return_exceptions=True)
+            await asyncio.to_thread(stop_model_preference_listener)
             await chat_jobs.redis.aclose()
 
 

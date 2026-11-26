@@ -12,6 +12,7 @@ from app.models.document import Document
 from app.models.document_event import DocumentEventModel
 from app.models.document_split import DocumentSplitModel
 from app.models.translation import TranslationModel
+from app.services.ai.model_preferences import ModelRole, get_model_names_sync
 from app.services.format.format_llm import format_markdown
 from app.services.language.translation import translate_content
 from app.services.storage.file_metadata import (
@@ -87,6 +88,9 @@ def format_all_markdown(
     splits = _splits_for_document(document_id, db_session)
     if not splits:
         raise ValueError(f"No document splits found for document {document_id}")
+    model_names = get_model_names_sync()
+    formatting_model = model_names[ModelRole.FORMATTING]
+    translation_model = model_names[ModelRole.TRANSLATION]
 
     for split in splits:
         if on_page is not None:
@@ -126,7 +130,7 @@ def format_all_markdown(
         page_text = get_text(split.ocr_storage_key)
 
         if needs_markdown:
-            original_markdown = format_markdown(page_text)
+            original_markdown = format_markdown(page_text, model_name=formatting_model)
             original_key = markdown_object_key(
                 workspace_id, document_id, split.page_number
             )
@@ -151,11 +155,13 @@ def format_all_markdown(
         for language in pending_languages:
             try:
                 translated_text = (
-                    translate_content(page_text, language)
+                    translate_content(page_text, language, model_name=translation_model)
                     if _should_translate(page_text, language)
                     else page_text
                 )
-                translated_markdown = format_markdown(translated_text)
+                translated_markdown = format_markdown(
+                    translated_text, model_name=formatting_model
+                )
                 object_key = translation_object_key(
                     workspace_id,
                     document_id,

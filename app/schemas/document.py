@@ -1,8 +1,6 @@
-from datetime import datetime
 from typing import Any, Literal
-from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 class DocumentUploadResponse(BaseModel):
@@ -42,23 +40,11 @@ class DocumentRetryResponse(BaseModel):
     status: Literal["retry_queued"] = "retry_queued"
 
 
-class DocumentHistoryEvent(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    status: str
-    stage: str | None
-    step: str | None
-    message: str | None
-    page_number: int | None
-    total_pages: int | None
-    created_at: datetime
-
-
-class DocumentHistoryResponse(BaseModel):
-    document_id: UUID
-    events: list[DocumentHistoryEvent]
-    next_cursor: UUID | None
+class DocumentCancelResponse(BaseModel):
+    document_id: str
+    task_id: str
+    status: Literal["cancelling"] = "cancelling"
+    message: str
 
 
 class DocumentStatusResponse(BaseModel):

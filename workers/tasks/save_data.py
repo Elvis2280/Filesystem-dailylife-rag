@@ -15,6 +15,7 @@ from app.models.document import Document
 from app.models.document_split import DocumentSplitModel
 from app.models.translation import TranslationModel
 from app.models.workspace import WorkspaceModel
+from app.services.ai.model_preferences import ModelRole, get_model_names_sync
 from app.services.format.cleaner_llm import clean_text
 from app.services.rag.embedding import embedding
 from app.services.rag.qdrant_client import (
@@ -27,6 +28,7 @@ from app.services.rag.qdrant_client import (
 from app.services.storage.object_storage import get_text
 from workers.celery_app import celery_app
 from workers.tasks.file_pipeline import (
+    DocumentCancellationRequested,
     _publish_status,
     document_worker_lock,
     record_pipeline_failure,
@@ -173,7 +175,11 @@ def run_indexing(
         with get_sync_db() as db_session:
             document = db_session.get(Document, UUID(document_id), with_for_update=True)
             if document is None:
-                raise ValueError(f"No document with ID {document_id}")
+                return {
+                    "indexed_pages": 0,
+                    "indexed_chunks": 0,
+                    "empty_pages": 0,
+                }
 
             expected = (
                 FileStatus.FILE_PROCESS_FINISHED
@@ -191,6 +197,10 @@ def run_indexing(
                 document.last_error = None
                 db_session.commit()
                 claimed = True
+
+            model_names = get_model_names_sync()
+            cleaning_model = model_names[ModelRole.CLEANING]
+            embedding_model = model_names[ModelRole.EMBEDDING]
 
             original_filename = document.original_filename
             workspace = (
@@ -283,9 +293,13 @@ def run_indexing(
                 )
 
                 if clean_source_text:
-                    raw_text = clean_text(raw_text)
-                    english_markdown = clean_text(english_markdown)
-                    japanese_markdown = clean_text(japanese_markdown)
+                    raw_text = clean_text(raw_text, model_name=cleaning_model)
+                    english_markdown = clean_text(
+                        english_markdown, model_name=cleaning_model
+                    )
+                    japanese_markdown = clean_text(
+                        japanese_markdown, model_name=cleaning_model
+                    )
 
                 if page == 1:
                     document_title = _extract_document_title(
@@ -342,7 +356,7 @@ def run_indexing(
                 chunk_data = [record[0] for record in chunk_records]
                 retrieval_data = [record[1] for record in chunk_records]
                 section_data = [record[2] for record in chunk_records]
-                embedding_data = embedding(retrieval_data)
+                embedding_data = embedding(retrieval_data, model_name=embedding_model)
 
                 logger.info(
                     "save_data: page %d produced %d English chunks",
@@ -397,8 +411,6 @@ def run_indexing(
                 db_session=db_session,
             )
 
-            if not maintenance_reindex:
-                document.status = FileStatus.COMPLETED.value
             publish_status(
                 document_id,
                 FilePipelineStage.COMPLETED,
@@ -413,6 +425,16 @@ def run_indexing(
                 "empty_pages": empty_pages,
             }
 
+    except DocumentCancellationRequested:
+        logger.info(
+            "Stopping indexing for document %s after cancellation was requested",
+            document_id,
+        )
+        return {
+            "indexed_pages": indexed_pages,
+            "indexed_chunks": indexed_chunks,
+            "empty_pages": empty_pages,
+        }
     except Exception as exc:
         if claimed:
             record_pipeline_failure(
