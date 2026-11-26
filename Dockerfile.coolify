@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    fontconfig \
+    fonts-liberation \
+    fonts-noto-cjk \
+    gosu \
+    libreoffice-calc \
+    libreoffice-impress \
+    libreoffice-writer \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r appgroup \
+    && useradd -r -g appgroup -m appuser \
+    && install -d -o appuser -g appgroup /app/temp_storage /app/temp_storage/ocr
+
+COPY requirements-runtime.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --no-compile -r requirements-runtime.txt
+
+COPY app/ ./app/
+COPY workers/ ./workers/
+COPY alembic/ ./alembic/
+COPY main.py alembic.ini reset_project_data.py ./
+COPY --chmod=755 docker/entrypoint.sh /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

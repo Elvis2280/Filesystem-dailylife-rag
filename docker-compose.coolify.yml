@@ -1,0 +1,254 @@
+x-app-image: &app_image
+  image: memory-rag-${COMPOSE_PROJECT_NAME}:local
+  pull_policy: never
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-memoryrag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-memoryrag}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', "pg_isready -U '$$POSTGRES_USER' -d '$$POSTGRES_DB'"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.1
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ['CMD-SHELL', "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  garage:
+    build:
+      context: .
+      dockerfile: Dockerfile.garage
+    command: ['/garage', 'server', '--single-node', '--default-bucket']
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?GARAGE_RPC_SECRET is required}
+      GARAGE_DEFAULT_ACCESS_KEY: ${GARAGE_ACCESS_KEY:?GARAGE_ACCESS_KEY is required}
+      GARAGE_DEFAULT_SECRET_KEY: ${GARAGE_SECRET_KEY:?GARAGE_SECRET_KEY is required}
+      GARAGE_DEFAULT_BUCKET: ${GARAGE_BUCKET:-memory-rag}
+    volumes:
+      - garage_meta:/var/lib/garage/meta
+      - garage_data:/var/lib/garage/data
+    healthcheck:
+      test: ['CMD', '/garage', 'json-api', 'GetClusterHealth']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  migrate:
+    <<: *app_image
+    command: ['alembic', 'upgrade', 'head']
+    environment: &app_environment
+      IS_DEVELOPMENT: 'false'
+      DEBUG: 'false'
+      DEBUGPY: 'false'
+      API_KEY: ${API_KEY:?API_KEY is required}
+      CORS_ORIGINS: ${CORS_ORIGINS:-tauri://localhost,http://tauri.localhost}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-documents}
+      QDRANT_HYBRID_COLLECTION: ${QDRANT_HYBRID_COLLECTION:-documents_v2}
+      QDRANT_USE_HYBRID: ${QDRANT_USE_HYBRID:-false}
+      QDRANT_DUAL_WRITE_HYBRID: ${QDRANT_DUAL_WRITE_HYBRID:-true}
+      GARAGE_HOST: garage
+      GARAGE_PORT: 3900
+      OBJECT_STORAGE_ENDPOINT: http://garage:3900
+      OBJECT_STORAGE_ACCESS_KEY: ${GARAGE_ACCESS_KEY:?GARAGE_ACCESS_KEY is required}
+      OBJECT_STORAGE_SECRET_KEY: ${GARAGE_SECRET_KEY:?GARAGE_SECRET_KEY is required}
+      OBJECT_STORAGE_BUCKET: ${GARAGE_BUCKET:-memory-rag}
+      OBJECT_STORAGE_REGION: garage
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-memoryrag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-memoryrag}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OLLAMA_HOST: ${OLLAMA_HOST:-host.docker.internal}
+      OLLAMA_PORT: ${OLLAMA_PORT:-11435}
+      OLLAMA_MODEL_OCR: ${OLLAMA_MODEL_OCR:-glm-ocr:latest}
+      OLLAMA_OCR_NUM_CTX: ${OLLAMA_OCR_NUM_CTX:-16384}
+      OLLAMA_OCR_NUM_PREDICT: ${OLLAMA_OCR_NUM_PREDICT:-8192}
+      OLLAMA_MODEL_FORMAT: ${OLLAMA_MODEL_FORMAT:-qwen3.5:9b}
+      OLLAMA_MODEL_TRANSLATION: ${OLLAMA_MODEL_TRANSLATION:-qwen3.5:27b}
+      OLLAMA_MODEL_CLEANER: ${OLLAMA_MODEL_CLEANER:-qwen3.5:9b}
+      OLLAMA_MODEL_EMBEDDING: ${OLLAMA_MODEL_EMBEDDING:-bge-m3}
+      OLLAMA_MODEL_AGENT: ${OLLAMA_MODEL_AGENT:-qwen3.5:9b}
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-600}
+      INFERENCE_QUEUE_TIMEOUT_SECONDS: ${INFERENCE_QUEUE_TIMEOUT_SECONDS:-1800}
+      CHAT_REQUEST_TIMEOUT_SECONDS: ${CHAT_REQUEST_TIMEOUT_SECONDS:-180}
+      CHAT_REDIS_HOST: chat-redis
+      TEMP_PATH: /app/temp_storage
+      TEMP_OCR_PATH: /app/temp_storage/ocr
+      CELERY_TASK_ALWAYS_EAGER: 'false'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  ollama-check:
+    <<: *app_image
+    command: ['python3.12', '-m', 'app.services.ai.ollama_preflight']
+    environment: *app_environment
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  chat-redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'yes', '--appendfsync', 'always']
+    volumes:
+      - chat_redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  inference:
+    <<: *app_image
+    command: ['uvicorn', 'app.api.inference:app', '--host', '0.0.0.0', '--port', '8001', '--workers', '1']
+    environment: *app_environment
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      chat-redis:
+        condition: service_healthy
+      ollama-check:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  api:
+    <<: *app_image
+    build:
+      context: .
+      dockerfile: Dockerfile.coolify
+    command: ['uvicorn', 'main:app', '--host', '0.0.0.0', '--port', '8000']
+    expose:
+      - '8000'
+    ports:
+      - '${RAG_HTTP_PORT:-18080}:8000'
+    environment:
+      <<: *app_environment
+      INFERENCE_BASE_URL: http://inference:8001
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      - temp_data:/app/temp_storage
+      - model_cache:/home/appuser/.cache
+    depends_on:
+      inference:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      garage:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ollama-check:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python3.12',
+          '-c',
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  worker:
+    <<: *app_image
+    command:
+      [
+        'celery',
+        '-A',
+        'workers.celery_app',
+        'worker',
+        '--loglevel=info',
+        '--pool=threads',
+      ]
+    environment:
+      <<: *app_environment
+      INFERENCE_BASE_URL: http://inference:8001
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      - temp_data:/app/temp_storage
+      - model_cache:/home/appuser/.cache
+    depends_on:
+      inference:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      garage:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ollama-check:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  garage_data:
+  garage_meta:
+  temp_data:
+  model_cache:
+  chat_redis_data:

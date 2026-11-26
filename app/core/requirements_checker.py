@@ -1,3 +1,4 @@
+import asyncio
 import socket
 from pathlib import Path
 
@@ -5,21 +6,16 @@ from app.core.config import settings
 
 
 def ensure_directories() -> dict:
-    """Create missing directories. Return status + paths dict."""
-    created = []
+    """Validate required directories exist. Return status + missing paths."""
+    missing = []
     for dir_path in settings.REQUIRED_DIRS:
         path = Path(dir_path)
-        if path.exists():
-            continue
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-            created.append(str(path))
-        except (OSError, PermissionError) as e:
-            raise RuntimeError(f"Failed to create directory {dir_path}: {e}") from e
+        if not path.exists():
+            missing.append(str(path))
 
     return {
-        "status": "created" if created else "satisfied",
-        "paths": created,
+        "status": "satisfied" if not missing else "missing",
+        "paths": missing,
     }
 
 
@@ -51,6 +47,17 @@ async def check_postgres_db() -> bool:
         return False
 
 
+async def check_object_storage() -> bool:
+    """Verify that Garage is reachable and the configured bucket is available."""
+    from app.services.storage.object_storage import check_bucket
+
+    try:
+        await asyncio.to_thread(check_bucket)
+        return True
+    except Exception:
+        return False
+
+
 async def validate_all() -> dict:
     """Run all checks. Return report dict with created dirs and service status."""
     report = {
@@ -60,5 +67,6 @@ async def validate_all() -> dict:
             for host, port in settings.REQUIRED_SERVICES
         },
         "postgres_db": await check_postgres_db(),
+        "object_storage": await check_object_storage(),
     }
     return report

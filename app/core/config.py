@@ -1,6 +1,7 @@
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -11,6 +12,10 @@ class Settings(BaseSettings):
     # App
     APP_NAME: str = "Personal Memory RAG"
     DEBUG: bool = False
+    API_KEY: str | None = Field(default=None)
+    CORS_ORIGINS_VALUE: str | None = Field(
+        default=None, validation_alias="CORS_ORIGINS"
+    )
 
     # Derived from IS_DEVELOPMENT
     @property
@@ -23,7 +28,20 @@ class Settings(BaseSettings):
 
     @property
     def CORS_ORIGINS(self) -> list[str]:
-        return ["*"] if self.IS_DEVELOPMENT else []
+        if self.CORS_ORIGINS_VALUE:
+            return [
+                origin.strip()
+                for origin in self.CORS_ORIGINS_VALUE.split(",")
+                if origin.strip()
+            ]
+        if not self.IS_DEVELOPMENT:
+            return []
+        return [
+            "http://localhost:1420",
+            "http://127.0.0.1:1420",
+            "http://localhost:3000",
+            "tauri://localhost",
+        ]
 
     @property
     def DOCS_URL(self) -> str | None:
@@ -37,12 +55,11 @@ class Settings(BaseSettings):
     def ACCESS_LOG(self) -> bool:
         return self.IS_DEVELOPMENT
 
-    @property
-    def CELERY_TASK_ALWAYS_EAGER(self) -> bool:
-        return self.IS_DEVELOPMENT
-
     # Embeddings
     EMBEDDING_DEVICE: str = Field(default="cpu")
+
+    # Debug
+    DEBUGPY: bool = Field(default=False)
 
     # Redis
     REDIS_HOST: str = "redis"
@@ -51,6 +68,19 @@ class Settings(BaseSettings):
     # Qdrant
     QDRANT_HOST: str = "qdrant"
     QDRANT_PORT: int = 6333
+    QDRANT_COLLECTION: str = "documents"
+    QDRANT_HYBRID_COLLECTION: str = "documents_v2"
+    QDRANT_USE_HYBRID: bool = False
+    QDRANT_DUAL_WRITE_HYBRID: bool = True
+
+    # Garage / S3-compatible object storage
+    GARAGE_HOST: str = "garage"
+    GARAGE_PORT: int = 3900
+    OBJECT_STORAGE_ENDPOINT: str = "http://garage:3900"
+    OBJECT_STORAGE_ACCESS_KEY: str = "GK00000000000000000000000000000000"
+    OBJECT_STORAGE_SECRET_KEY: str = "0" * 64
+    OBJECT_STORAGE_BUCKET: str = "memory-rag"
+    OBJECT_STORAGE_REGION: str = "garage"
 
     # Postgres
     POSTGRES_HOST: str = "postgres"
@@ -63,26 +93,75 @@ class Settings(BaseSettings):
     NGINX_HOST: str = "nginx"
     NGINX_PORT: int = 80
 
-    # Brain Storage
-    BRAIN_PATH: str = "./brain"
-    BRAIN_ENGLISH_PATH: str = "./brain/english"
-    BRAIN_JAPANESE_PATH: str = "./brain/japanese"
+    # Ollama
+    OLLAMA_BASE_URL: str | None = None
+    # Compose sets this on API and Celery only. The dispatcher uses OLLAMA_URL.
+    INFERENCE_BASE_URL: str | None = None
+    CHAT_REDIS_HOST: str = "chat-redis"
+    INFERENCE_QUEUE_TIMEOUT_SECONDS: int = Field(default=1800, gt=0)
+    OLLAMA_HOST: str = "localhost"
+    OLLAMA_PORT: int = 11434
+    OLLAMA_MODEL_OCR: str = "glm-ocr:latest"
+    OLLAMA_OCR_NUM_CTX: int = Field(default=16384, gt=0)
+    OLLAMA_OCR_NUM_PREDICT: int = Field(default=8192, gt=0)
+    OLLAMA_MODEL_FORMAT: str = "qwen3.5:9b"
+    OLLAMA_MODEL_TRANSLATION: str = "qwen3.5:27b"
+    OLLAMA_MODEL_CLEANER: str = "qwen3.5:9b"
+    OLLAMA_MODEL_EMBEDDING: str = "bge-m3:latest"
+    OLLAMA_MODEL_AGENT: str = "qwen3.5:9b"
+    OLLAMA_TIMEOUT: int = 600
+    CHAT_REQUEST_TIMEOUT_SECONDS: int = Field(default=180, gt=0)
+    CHAT_STREAM_HEARTBEAT_SECONDS: int = Field(default=10, gt=0)
 
-    # Directory structure
-    BRAIN_WORKSPACE_SUBDIRS: list[str] = Field(
-        default=[
-            "english/work",
-            "english/personal",
-            "japanese/work",
-            "japanese/personal",
-        ]
-    )
+    @model_validator(mode="after")
+    def _validate_ocr_token_budget(self) -> "Settings":
+        if self.OLLAMA_OCR_NUM_PREDICT >= self.OLLAMA_OCR_NUM_CTX:
+            raise ValueError(
+                "OLLAMA_OCR_NUM_PREDICT must be less than OLLAMA_OCR_NUM_CTX"
+            )
+        return self
+
+    @field_validator("OLLAMA_BASE_URL", "INFERENCE_BASE_URL", mode="before")
+    @classmethod
+    def _normalize_ollama_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        base_url = str(value).strip().rstrip("/")
+        if not base_url:
+            return None
+
+        parsed_url = urlsplit(base_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+            raise ValueError("Inference URLs must be absolute http:// or https:// URLs")
+        try:
+            parsed_url.port
+        except ValueError as exc:
+            raise ValueError("Inference URL contains an invalid port") from exc
+
+        return base_url
+
+    @property
+    def OLLAMA_URL(self) -> str:
+        """Return the configured Ollama URL or the legacy HTTP host and port."""
+        if self.OLLAMA_BASE_URL:
+            return self.OLLAMA_BASE_URL
+        return f"http://{self.OLLAMA_HOST}:{self.OLLAMA_PORT}"
+
+    @property
+    def inference_url(self) -> str:
+        return self.INFERENCE_BASE_URL or self.OLLAMA_URL
+
+    @property
+    def inference_timeout(self) -> int:
+        if self.INFERENCE_BASE_URL:
+            return self.OLLAMA_TIMEOUT + self.INFERENCE_QUEUE_TIMEOUT_SECONDS + 10
+        return self.OLLAMA_TIMEOUT
 
     @property
     def REQUIRED_DIRS(self) -> list[str]:
         """Full paths of all required directories for startup validation."""
-        base = Path(self.BRAIN_PATH)
-        return [str(base / subdir) for subdir in self.BRAIN_WORKSPACE_SUBDIRS]
+        return [self.TEMP_PATH]
 
     @property
     def DATABASE_URL(self) -> str:
@@ -98,19 +177,38 @@ class Settings(BaseSettings):
         return [
             (self.REDIS_HOST, self.REDIS_PORT),
             (self.POSTGRES_HOST, self.POSTGRES_PORT),
-            (self.NGINX_HOST, self.NGINX_PORT),
+            (self.GARAGE_HOST, self.GARAGE_PORT),
         ]
 
-    # Upload Staging
-    UPLOAD_PATH: str = "./storage/uploads"
+    # Local scratch space. Durable files live in Garage.
+    TEMP_PATH: str = "./temp_storage"
+    TEMP_OCR_PATH: str = "./temp_storage/ocr"
+
+    def temp_workspace_path(self, workspace_id: str) -> str:
+        """Return the temp storage root for a workspace's staging files."""
+        return str(Path(self.TEMP_PATH) / workspace_id)
 
     # Celery
-    CELERY_BROKER_URL: str = "redis://localhost:6379/1"
-    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
+    CELERY_TASK_ALWAYS_EAGER: bool = Field(default=False)
+
+    @property
+    def CELERY_BROKER_URL(self) -> str:
+        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/1"
+
+    @property
+    def CELERY_RESULT_BACKEND(self) -> str:
+        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/2"
+
+    @model_validator(mode="after")
+    def _resolve_paths_to_absolute(self) -> "Settings":
+        self.TEMP_PATH = str(Path(self.TEMP_PATH).resolve())
+        self.TEMP_OCR_PATH = str(Path(self.TEMP_OCR_PATH).resolve())
+        return self
 
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 settings = Settings()

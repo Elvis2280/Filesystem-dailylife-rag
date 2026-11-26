@@ -1,111 +1,48 @@
-# AGENTS.md - Memory RAG
+# AGENTS.md - Memory RAG Context & Rules
 
-## Run Commands
+## Scope & Exclusions (Token Optimization)
+- **Ignored Directories**: NEVER scan, read, or search inside `temp_storage/`, `brain/`, `tests/`, `alembic/`, or `.github/`.
+- **Targeted File Reference**: Rely strictly on `@` file references or explicit paths provided in prompts.
+- **Search Boundaries**: When looking for files or code definitions, restrict searches exclusively to `app/`, `workers/`, and root level files (e.g., `main.py`).
+
+## Technical Stack & Execution Boundaries
+- **Python 3.11+**: Use strict type hints (`dict[str, Any]`, `list[int]`).
+- **FastAPI**: Endpoints in `main.py` or routing modules must be `async def`. Use Dependency Injection (`Depends`).
+- **Celery**: Tasks in `workers/` run synchronously. **Never** directly call `async` service functions inside Celery workers without `asyncio.run()`.
+- **Services Boundary**: Code in `app/services/` contains pure business logic and must remain decoupled from FastAPI and Celery frameworks.
+- **Documentation Tooling**: When searching for framework docs or solving API issues, automatically look up documentation using the **Context7** tool for up-to-date API references.
+
+## Common Developer Commands
 
 ```bash
-# API server
+# API Server
 uvicorn main:app --reload
 
-# Celery worker (separate terminal)
+# Celery Worker (Separate terminal)
 celery -A workers.celery_app worker --loglevel=info
 
-# Tests
+# Tests & Quality Controls
 pytest
-
-# Lint & Format
 ruff check .
 ruff format .
-```
 
-## Architecture
+---
 
-- **API**: FastAPI in `main.py` - handles REST + WebSocket, dispatches to Celery workers
-- **Workers**: Celery tasks in `workers/` - async pipeline: ocr → translation → embedding → indexing
-- **Orchestrator**: Event-driven workflow coordinator in `app/orchestrator/`
-- **Client**: OpenCLAW (external AI agent) calls via REST + WebSocket
+### 2. Create a `.codexignore` File
 
-## Memory Layers
+In your project root, create a file named `.codexignore` (or `.gitignore` if not already present) to prevent the scanner from reading these folders into memory:
 
-| Layer | Storage | Purpose |
-|-------|---------|---------|
-| Hot/Temporal | Redis | Quick embeddings, session data, task status |
-| Vector | Qdrant | Dense semantic embeddings for retrieval |
-| Relational | Postgres | Document metadata, relationships |
+```text
+# Ignore heavy or temporary data folders
+temp_storage/
+brain/
+tests/
+alembic/
+.github/
 
-## Pipeline
-
-1. Upload → detect language → store in `brain/english/` + `brain/japanese/`
-2. Quick embedding → Redis (hot data)
-3. Async: ocr → translation → chunking → embedding → indexing → Qdrant + Redis
-4. Bilingual: EN input → JA copy + both embeddings; JA input → EN copy + both embeddings
-
-## Key Files
-
-- `app/core/config.py` - Settings (Redis, Qdrant, Postgres, Celery)
-- `app/services/` - Pure business logic (no FastAPI/Celery deps)
-- `app/orchestrator/` - Event-driven pipeline coordination
-- `workers/` - Celery async tasks (OCR, translation, embedding, indexing, chunking)
-- `.env` - Environment variables (create manually; see Setup section)
-
-## Setup
-
-```bash
-# Dependencies
-pip install -r requirements.txt
-
-# External services (Redis, Qdrant, Postgres)
-docker-compose up -d
-
-# .env with only overrides (optional):
-#   IS_DEVELOPMENT=true              # Enable dev mode
-#   REDIS_HOST=localhost             # Local dev override (default: redis)
-#   QDRANT_HOST=localhost            # Local dev override (default: qdrant)
-#   POSTGRES_HOST=localhost          # Local dev override (default: postgres)
-# All other settings use sensible defaults from app/core/config.py
-# All other settings use sensible defaults from app/core/config.py
-```
-
-## Code Review Guidelines
-
-When reviewing code, act as a **senior developer mentor**. Teach by explaining *why* something is a problem, not just *what* is wrong.
-
-### Review Areas
-
-| Category | What to Check |
-|----------|---------------|
-| **Logic** | Bugs, edge cases, incorrect flow, race conditions |
-| **Clean Code** | Function size, naming, SRP, DRY, duplicated code |
-| **Architecture** | Separation of concerns, module boundaries, dependency direction |
-| **FastAPI** | Proper routing, dependency injection, async/await usage |
-| **Celery** | Task design, retry logic, chain vs chord usage |
-| **Python** | Type hints, exception handling, context managers |
-| **Security** | Input validation, SQL/parameter injection, secrets handling |
-| **Database** | Query optimization, connection pooling, transactions |
-| **Performance** | N+1 queries, unnecessary iterations, caching |
-| **API Design** | RESTful conventions, status codes, pagination |
-
-### Review Response Format
-
-```markdown
-## Code Review: <filename>
-
-### 🔴 Critical (fix immediately)
-- Issue: [what] → Why: [explanation] → Fix: [suggestion]
-
-### 🟡 Warnings (should fix)
-- Issue: [what] → Suggestion: [improvement]
-
-### 💡 Optimizations (nice to have)
-- Tip: [suggestion with rationale]
-
-### ✅ Good Practices
-- What they're doing well
-```
-
-### Principles
-
-1. **Explain the "why"** - Don't just say "use async", explain when/why it matters
-2. **Prioritize** - Critical issues first, then warnings, then suggestions
-3. **Offer alternatives** - Show better code, not just criticism
-4. **Be constructive** - Acknowledge good patterns before pointing out issues
-5. **Reference docs** - Link to official best practices when relevant
+# Standard Python / system ignores
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/

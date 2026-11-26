@@ -1,7 +1,6 @@
 import asyncio
 import shutil
 from pathlib import Path
-import app.core.constant
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -15,8 +14,6 @@ if TEST_BRAIN.exists():
     shutil.rmtree(TEST_BRAIN)
 TEST_BRAIN.mkdir(parents=True)
 
-
-app.core.constant.WORKSPACE_BASE_PATH = str(TEST_BRAIN)
 
 TEST_DB = "test_memoryrag"
 TEST_DATABASE_URL = (

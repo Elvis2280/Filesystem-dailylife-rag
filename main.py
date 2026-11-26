@@ -1,45 +1,79 @@
-from fastapi import FastAPI
+"""Memory RAG - FastAPI Application Entry Point.
+
+A bilingual (English/Japanese) Retrieval-Augmented Generation system that
+processes uploaded documents through an async pipeline: OCR → translation →
+chunking → embedding → indexing. Uses FastAPI for the REST + WebSocket API,
+with Celery workers handling the heavy async processing.
+
+Architecture:
+    ┌──────────┐     ┌─────────────┐     ┌──────────────────┐
+    │  Client  │────▶│  FastAPI     │────▶│  Celery Workers  │
+    │ (OpenCLAW)│     │  (main.py)   │     │  (workers/)      │
+    └──────────┘     └─────────────┘     └──────────────────┘
+                           │                       │
+                           ▼                       ▼
+                    ┌──────────────┐     ┌──────────────────┐
+                    │   Services   │     │  Storage Layers  │
+                    │  (app/services)    │Garage/Redis/Qdrant/PG│
+                    └──────────────┘     └──────────────────┘
+
+Startup Validation:
+    On startup, verifies all external services are reachable
+    (Redis, Garage, Qdrant, Postgres, Ollama) and required directories exist.
+    Raises RuntimeError if any critical dependency is missing.
+"""
+
+import asyncio
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.core.config import settings
+from app.api.routes.chat import router as chat_router
+from app.api.routes.document import router as document_router
+from app.api.routes.history import router as history_router
+from app.api.routes.ollama import router as ollama_router
 from app.api.routes.workspace import router as workspace_router
-from app.core.requirements_checker import validate_all
+from app.core.api_key import is_api_key_valid
+from app.core.config import settings
 from app.core.logging import configure_logging
-
-if settings.IS_DEVELOPMENT:
-    from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI(
-    title=settings.APP_NAME,
-    version="1.0.0",
-    docs_url=settings.DOCS_URL,
-    redoc_url=settings.REDOC_URL,
-)
-
-if settings.IS_DEVELOPMENT:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-app.include_router(workspace_router)
+from app.core.requirements_checker import validate_all
 
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Handle startup & shutdown lifecycle for the application.
+
+    Startup:
+        Validates all external services (Redis, Garage, Qdrant, Postgres, Ollama)
+        and required directories. Raises RuntimeError if any critical
+        dependency is missing.
+
+    Shutdown:
+        Closes the async Redis client connection pool.
+    """
+    # ── Startup ──
     logger = configure_logging(settings.LOG_LEVEL)
     report = await validate_all()
 
-    # Directory report
-    dir_report = report["directories_created"]
-    if dir_report["status"] == "created":
-        logger.info("Created directories: %s", dir_report["paths"])
-    else:
-        logger.info("All base directories already satisfied")
+    if report.get("postgres_db"):
+        from app.services.ai.model_preferences import (
+            ensure_model_preferences_storage,
+            start_model_preference_listener,
+        )
 
+        ensure_model_preferences_storage()
+        start_model_preference_listener()
+
+    # --- Directory Validation ---
+    dir_report = report["directories_created"]
+    if dir_report["status"] == "satisfied":
+        logger.info("All base directories already satisfied")
+    elif dir_report["status"] == "missing":
+        logger.warning("Missing directories: %s", dir_report["paths"])
+
+    # --- Service Connectivity Checks ---
     errors = []
     for endpoint, is_up in report["services_status"].items():
         if is_up:
@@ -48,26 +82,159 @@ async def startup_event():
             logger.error(f"Service {endpoint} is NOT reachable")
             errors.append(f"Service {endpoint} is not reachable")
 
+    # --- Postgres Database Check ---
     if report.get("postgres_db"):
         logger.info("Postgres DB: connected")
     else:
         logger.error("Postgres DB: connection failed")
         errors.append("Postgres DB connection failed")
 
+    # --- Garage Bucket Check ---
+    if report.get("object_storage"):
+        logger.info("Garage bucket '%s': available", settings.OBJECT_STORAGE_BUCKET)
+    else:
+        logger.error("Garage bucket '%s': unavailable", settings.OBJECT_STORAGE_BUCKET)
+        errors.append("Garage object storage bucket is unavailable")
+
+    # --- Ollama Model Availability Check ---
+    from app.services.ai.ollama_client import OllamaClient
+    from app.services.ai.model_names import model_is_available
+    from app.services.ai.model_preferences import (
+        ModelRole,
+        effective_model_preferences,
+        get_preferences_async,
+    )
+
+    ollama = OllamaClient()
+    health_resp = await ollama.health_check()
+    database_available = report.get("postgres_db", False)
+    preferences = await get_preferences_async() if database_available else None
+    if health_resp.is_reachable:
+        logger.info("Ollama: connected at %s", settings.OLLAMA_URL)
+        if database_available:
+            effective_models = effective_model_preferences(preferences)
+            selected_models = {
+                "OCR": effective_models[ModelRole.OCR.value],
+                "Translation": effective_models[ModelRole.TRANSLATION.value],
+                "Embedding": effective_models[ModelRole.EMBEDDING.value],
+                "Answer": effective_models[ModelRole.ANSWER.value],
+                "Formatting": effective_models[ModelRole.FORMATTING.value],
+                "Cleaning": effective_models[ModelRole.CLEANING.value],
+            }
+            for role, model_name in selected_models.items():
+                if model_is_available(model_name, set(health_resp.available_models)):
+                    logger.info(
+                        "Ollama model '%s' for %s is available", model_name, role
+                    )
+                else:
+                    logger.warning(
+                        "Ollama model '%s' for %s is NOT available", model_name, role
+                    )
+
+    else:
+        logger.warning(
+            "Ollama: NOT reachable at %s. OCR and LLM features will be unavailable.",
+            settings.OLLAMA_URL,
+        )
+
+    # Fail fast if any critical dependency is missing
     if errors:
         raise RuntimeError("Startup validation failed: " + "; ".join(errors))
+
+    try:
+        yield  # ── Application runs here ──
+    finally:
+        # ── Shutdown ──
+        from app.core.redis_client import close_async_redis_client
+        from app.services.ai.model_preferences import stop_model_preference_listener
+        from app.services.chat.jobs import chat_jobs
+
+        await asyncio.to_thread(stop_model_preference_listener)
+        await chat_jobs.redis.aclose()
+        await close_async_redis_client()
+
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version="1.0.0",
+    docs_url=settings.DOCS_URL,
+    redoc_url=settings.REDOC_URL,
+    lifespan=lifespan,
+)
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    """Require the configured API key for protected HTTP endpoints."""
+    if (
+        not settings.API_KEY
+        or request.method == "OPTIONS"
+        or request.url.path in {"/", "/health"}
+    ):
+        return await call_next(request)
+
+    if not is_api_key_valid(request.headers.get("X-API-Key")):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Missing or invalid API key"},
+        )
+
+    return await call_next(request)
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=[
+        "Accept-Ranges",
+        "Content-Range",
+        "Content-Length",
+        "Content-Disposition",
+        "ETag",
+        "Last-Modified",
+    ],
+)
+
+# Model management is available to the frontend in every environment.
+app.include_router(ollama_router)
+
+# Keep the upload-based OCR test endpoint development-only.
+if settings.IS_DEVELOPMENT:
+    from app.api.routes.ollama import dev_router as ollama_dev_router
+
+    app.include_router(ollama_dev_router)
+
+# Register API route modules
+app.include_router(chat_router)
+app.include_router(workspace_router)
+app.include_router(document_router)
+app.include_router(history_router)
 
 
 @app.get("/")
 def root():
+    """Root endpoint returning a basic status message.
+
+    Returns:
+        JSONResponse: Simple health-check style response confirming the API is live.
+    """
     return JSONResponse(content={"message": "Hello World", "status": "ok"})
 
 
 @app.get("/health")
 def health():
+    """Health check endpoint for load balancers and monitoring.
+
+    Returns:
+        JSONResponse: Status indicating the application is running.
+    """
     return JSONResponse(content={"status": "healthy"})
 
 
+# Development server entry point — not used in production (gunicorn instead)
 if __name__ == "__main__":
     import uvicorn
 

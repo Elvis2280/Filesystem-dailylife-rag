@@ -1,0 +1,124 @@
+"""Synchronous Ollama client for Celery workers.
+
+Uses the official ollama Python library for straightforward sync API calls.
+This module is the sync counterpart to app.services.ai.ollama_client,
+designed for use in blocking contexts (Celery tasks, not FastAPI routes).
+Provides a generic generate() method that accepts model, prompt, and image
+as parameters — callers are responsible for prompt engineering and model selection.
+"""
+
+from ollama import Client
+
+from app.core.config import settings
+
+
+class OllamaSyncClient:
+    """Sync client using the official ollama Python library.
+
+    Provides blocking API calls to the Ollama server for use within
+    Celery worker tasks. The official ollama library is sync-only,
+    making it ideal for worker processes where async I/O offers
+    no benefit.
+
+    Attributes:
+        _client: Internal ollama.Client instance bound to the server URL.
+    """
+
+    def __init__(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+    ):
+        """Initialize the sync Ollama client.
+
+        Args:
+            host: Ollama server hostname. Falls back to settings.OLLAMA_HOST.
+            port: Ollama server port. Falls back to settings.OLLAMA_PORT.
+        """
+        if host is not None or port is not None:
+            host = host or settings.OLLAMA_HOST
+            port = port or settings.OLLAMA_PORT
+            base_url = f"http://{host}:{port}"
+        else:
+            base_url = settings.inference_url
+        self._client = Client(
+            host=base_url,
+            timeout=settings.inference_timeout,
+        )
+
+    def generate(
+        self,
+        model: str,
+        prompt: str,
+        image: str | bytes | None = None,
+        num_ctx: int = 8192,
+        num_predict: int = 4096,
+        temperature: float = 0.0,
+    ) -> str:
+        """Send a chat request to Ollama with model, prompt, and optional image.
+
+        Uses deterministic settings (temperature=0, generous context window)
+        for reliable results. The caller is responsible for prompt
+        engineering and model selection.
+
+        Args:
+            model: Ollama model name (e.g. "glm-ocr:latest").
+            prompt: Text prompt instructing the model.
+            image: Path to the image file or image data as bytes. If None,
+                a text-only request is sent.
+
+        Returns:
+            Generated text response from the model.
+
+        Raises:
+            RuntimeError: If the model is unavailable or returns an error.
+        """
+        message = {"role": "user", "content": prompt}
+        if image is not None:
+            message["images"] = [image]
+
+        try:
+            response = self._client.chat(
+                model=model,
+                messages=[message],
+                stream=False,
+                think=False,
+                options={
+                    "num_ctx": num_ctx,
+                    "num_predict": num_predict,
+                    "temperature": temperature,
+                },
+            )
+            return str(response.message.content)
+        except Exception as e:
+            raise RuntimeError(f"Ollama generation failed: {e}") from e
+
+    def embed(
+        self,
+        model: str,
+        input: str | list[str],
+    ) -> list[list[float]]:
+        """Send a text embedding request to Ollama.
+
+        Uses the official /api/embed endpoint, which accepts a single
+        string or a batch of strings. Returns the embedding vectors as
+        plain Python lists of floats.
+
+        Args:
+            model: Ollama embedding model name (e.g. "bge-m3").
+            input: Text or list of texts to embed.
+
+        Returns:
+            List of embedding vectors, one per input text.
+
+        Raises:
+            RuntimeError: If the model is unavailable or returns an error.
+        """
+        try:
+            response = self._client.embed(
+                model=model,
+                input=input,
+            )
+            return [list(vector) for vector in response.embeddings]
+        except Exception as e:
+            raise RuntimeError(f"Ollama embedding failed: {e}")
