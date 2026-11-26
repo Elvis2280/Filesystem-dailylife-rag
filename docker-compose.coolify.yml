@@ -1,3 +1,7 @@
+x-app-image: &app_image
+  image: memory-rag-${COMPOSE_PROJECT_NAME}:local
+  pull_policy: never
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -57,9 +61,7 @@ services:
     restart: unless-stopped
 
   migrate:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *app_image
     command: ['alembic', 'upgrade', 'head']
     environment: &app_environment
       IS_DEVELOPMENT: 'false'
@@ -112,9 +114,7 @@ services:
     restart: 'no'
 
   ollama-check:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *app_image
     command: ['python3.12', '-m', 'app.services.ai.ollama_preflight']
     environment: *app_environment
     extra_hosts:
@@ -137,7 +137,7 @@ services:
     restart: unless-stopped
 
   inference:
-    build: .
+    <<: *app_image
     command: ['uvicorn', 'app.api.inference:app', '--host', '0.0.0.0', '--port', '8001', '--workers', '1']
     environment: *app_environment
     extra_hosts:
@@ -154,9 +154,10 @@ services:
     restart: unless-stopped
 
   api:
+    <<: *app_image
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.coolify
     command: ['uvicorn', 'main:app', '--host', '0.0.0.0', '--port', '8000']
     expose:
       - '8000'
@@ -204,9 +205,7 @@ services:
           memory: 4G
 
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *app_image
     command:
       [
         'celery',

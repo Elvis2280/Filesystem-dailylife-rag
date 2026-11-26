@@ -28,9 +28,15 @@ second Ollama container. GPU support is managed by the host Ollama installation.
 5. Configure host Ollama as described below.
 6. Add the environment variables below and deploy.
 
-Coolify must build the application image from the repository. The image already
-contains the Python source, `main.py`, `alembic.ini`, and migration package. Do
-not add host bind mounts for `./app`, `./workers`, `./main.py`, `./alembic.ini`,
+Coolify builds `Dockerfile.coolify` for `api` and reuses that image for `worker`,
+`inference`, `migrate`, and `ollama-check`. Use ordinary redeploys with Docker's
+build cache enabled. The first build installs the runtime packages. Later
+deployments can reuse those layers if only the application source changed.
+In Deployment Logs, compare the image build time with the time until the API
+answers at `/health`. If startup is slow, check `migrate` and `ollama-check` logs.
+
+The image contains the Python source, `main.py`, `alembic.ini`, and migration
+package. Do not add host bind mounts for `./app`, `./workers`, `./main.py`, `./alembic.ini`,
 `./alembic`, or the Nginx configuration. Those mounts are intended for local
 development and can cause Coolify's file-to-directory mount error. Garage's
 configuration is copied into its image from `docker/garage/garage.toml`; do not
